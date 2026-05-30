@@ -52,9 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     convert_fields.add_argument("--input", required=True, help="Path to the source XDP/XML/PDF file.")
     convert_fields.add_argument("--output", required=True, help="Path to the new output XDP/XML/PDF file.")
     convert_fields.add_argument(
-        "--truth-csv",
+        "--truth-code",
         default=None,
-        help="Optional override for the canonical field list CSV. Defaults to רשימת שדות מהקוד.csv in the workspace.",
+        help="Optional override for the canonical Plan-T code file. Defaults to PDFFormsBL*plan-t.cs near the workspace.",
     )
     convert_fields.add_argument(
         "--report",
@@ -139,11 +139,11 @@ def cmd_convert_fields(args: argparse.Namespace) -> int:
     if _is_pdf(args.input) != _is_pdf(args.output):
         raise ValueError("Input and output must use the same file type, for example PDF to PDF.")
 
-    truth = FieldTruth(args.truth_csv) if args.truth_csv else FieldTruth.default()
+    truth = FieldTruth(args.truth_code) if args.truth_code else FieldTruth.default()
     colors.step(f"Loading input: {args.input}")
     editor = _load_editor(args.input)
     try:
-        colors.step(f"Loading source-of-truth fields: {truth.csv_path}")
+        colors.step(f"Loading source-of-truth fields: {truth.code_path}")
         report = convert_editor_fields(editor, truth)
         colors.info(
             f"Processed {report.total_fields} fields. Known={report.exact_or_known}, renamed={report.renamed}, unmatched={report.unmatched}."

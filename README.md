@@ -7,7 +7,7 @@ Small Python CLI for editing Adobe XDP/XFA files, including PDFs that contain em
 - Lists page subforms such as `Page1`, `Page26`, `Page33`
 - Lists fields inside a page
 - Replaces one page subform from an XML fragment file
-- Converts embedded field names to canonical code-list names
+- Converts embedded field names to canonical names extracted from the Plan-T code file
 - Preserves the source file by always writing to a new output file
 - Supports PDF input/output when the PDF contains an embedded `/AcroForm` `/XFA` packet
 - Prints progress in color in the terminal
@@ -56,10 +56,16 @@ Replace a page inside a PDF with embedded XFA and write a new PDF:
 xdp-form-cli replace-page --input "C:\path\form.pdf" --page Page26 --fragment "C:\path\Page26.xml" --output "C:\path\form_copy.pdf"
 ```
 
-Convert field names in a PDF using the workspace source-of-truth CSV:
+Convert field names in a PDF using the default Plan-T code file:
 
 ```powershell
 xdp-form-cli convert-fields --input "C:\path\form.pdf" --output "C:\path\form_converted.pdf" --report "C:\path\form_converted_report.csv"
+```
+
+Convert field names using an explicit Plan-T code file:
+
+```powershell
+xdp-form-cli convert-fields --input "C:\path\form.pdf" --output "C:\path\form_converted.pdf" --truth-code "C:\path\PDFFormsBL_plan-t.cs" --report "C:\path\form_converted_report.csv"
 ```
 
 ## Fragment format
@@ -79,7 +85,7 @@ Example:
 
 - Do not pretty-print the output XML. This tool writes compact XML to reduce layout and formatting risk.
 - PDF support requires a real embedded XFA packet at `/Root` -> `/AcroForm` -> `/XFA`.
-- `convert-fields` uses `רשימת שדות מהקוד.csv` by default unless `--truth-csv` is provided.
+- `convert-fields` uses the `PDFFormsBL*plan-t.cs` file by default unless `--truth-code` is provided.
 - The conversion is conservative. Exact known names stay as-is, clear canonical reductions are renamed, and uncertain names remain unchanged and appear in the report.
 - Encrypted, signed, certified, or Reader-extended PDFs may reject edits or lose validation/signature status after saving a modified copy.
 - This tool edits the XFA XML. It does not redraw static PDF page content or convert XFA forms into AcroForms.

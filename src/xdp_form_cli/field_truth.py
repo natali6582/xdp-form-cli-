@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +8,7 @@ from pathlib import Path
 _BRACKET_INDEX_RE = re.compile(r"\[\d+\]")
 _DUPLICATED_SUFFIX_RE = re.compile(r"_DUPLICATED_\d+$", re.IGNORECASE)
 _NUMBER_SUFFIX_RE = re.compile(r"_\d+$")
+_FIELD_TOKEN_RE = re.compile(r"\b(?:txt|chk|img)[A-Za-z0-9_]+\b")
 
 
 @dataclass
@@ -21,12 +21,11 @@ class FieldMatch:
 
 
 class FieldTruth:
-    def __init__(self, csv_path: str | Path) -> None:
-        self.csv_path = Path(csv_path)
-        with self.csv_path.open(encoding="utf-8-sig", newline="") as handle:
-            rows = list(csv.DictReader(handle))
+    def __init__(self, code_path: str | Path) -> None:
+        self.code_path = Path(code_path)
+        source = self.code_path.read_text(encoding="utf-8-sig", errors="ignore")
+        names = sorted(set(_FIELD_TOKEN_RE.findall(source)))
 
-        names = [row["field_name"].strip() for row in rows if row.get("field_name", "").strip()]
         self.names = names
         self.name_set = set(names)
         self.casefold_map = {name.casefold(): name for name in names}
@@ -34,8 +33,21 @@ class FieldTruth:
     @classmethod
     def default(cls) -> "FieldTruth":
         repo_root = Path(__file__).resolve().parents[2]
-        csv_path = repo_root.parent / "מיכון טפסים" / "רשימת שדות מהקוד.csv"
-        return cls(csv_path)
+        search_roots = [repo_root.parent.parent, repo_root.parent]
+
+        for root in search_roots:
+            preferred = sorted(root.glob("PDFFormsBL*plan-t.cs"))
+            if preferred:
+                return cls(preferred[0])
+
+        for root in search_roots:
+            fallback = sorted(root.glob("**/PDFFormsBL*.cs"))
+            if fallback:
+                return cls(fallback[0])
+
+        raise FileNotFoundError(
+            "Could not find the Plan-T code field source file (PDFFormsBL*.cs) near the workspace."
+        )
 
     def match(self, field_name: str) -> FieldMatch:
         raw = field_name.strip()
