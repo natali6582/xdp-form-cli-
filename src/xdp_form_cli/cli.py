@@ -6,6 +6,8 @@ from pathlib import Path
 
 from xdp_form_cli import __version__
 from xdp_form_cli import colors
+from xdp_form_cli.field_conversion import convert_editor_fields
+from xdp_form_cli.field_truth import FieldTruth
 from xdp_form_cli.pdf_xfa_editor import PdfXfaEditor
 from xdp_form_cli.xdp_editor import XdpEditor
 
@@ -41,6 +43,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         required=True,
         help="Path to the new output XDP/XML/PDF file. Must not be the source file.",
+    )
+
+    convert_fields = subparsers.add_parser(
+        "convert-fields",
+        help="Rename PDF/XDP field names to canonical code-list names and save a new output copy.",
+    )
+    convert_fields.add_argument("--input", required=True, help="Path to the source XDP/XML/PDF file.")
+    convert_fields.add_argument("--output", required=True, help="Path to the new output XDP/XML/PDF file.")
+    convert_fields.add_argument(
+        "--truth-csv",
+        default=None,
+        help="Optional override for the canonical field list CSV. Defaults to רשימת שדות מהקוד.csv in the workspace.",
+    )
+    convert_fields.add_argument(
+        "--report",
+        default=None,
+        help="Optional CSV report path with original and canonical field names.",
     )
 
     return parser
@@ -114,6 +133,38 @@ def cmd_replace_page(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_convert_fields(args: argparse.Namespace) -> int:
+    if args.input == args.output:
+        raise ValueError("--output must be a new file path, not the source file.")
+    if _is_pdf(args.input) != _is_pdf(args.output):
+        raise ValueError("Input and output must use the same file type, for example PDF to PDF.")
+
+    truth = FieldTruth(args.truth_csv) if args.truth_csv else FieldTruth.default()
+    colors.step(f"Loading input: {args.input}")
+    editor = _load_editor(args.input)
+    try:
+        colors.step(f"Loading source-of-truth fields: {truth.csv_path}")
+        report = convert_editor_fields(editor, truth)
+        colors.info(
+            f"Processed {report.total_fields} fields. Known={report.exact_or_known}, renamed={report.renamed}, unmatched={report.unmatched}."
+        )
+
+        colors.step(f"Writing output copy: {args.output}")
+        if isinstance(editor, PdfXfaEditor):
+            output = editor.save_copy(args.output)
+            colors.success(f"Saved updated PDF copy: {output}")
+        else:
+            output = editor.write_copy(args.output)
+            colors.success(f"Saved updated XDP/XML copy: {output}")
+
+        if args.report:
+            report_path = report.write_csv(args.report)
+            colors.success(f"Saved conversion report: {report_path}")
+    finally:
+        _close_editor(editor)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -125,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_list_fields(args)
         if args.command == "replace-page":
             return cmd_replace_page(args)
+        if args.command == "convert-fields":
+            return cmd_convert_fields(args)
         parser.error(f"Unsupported command: {args.command}")
         return 2
     except Exception as exc:

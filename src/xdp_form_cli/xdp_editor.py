@@ -6,6 +6,8 @@ from shutil import copy2
 
 from lxml import etree
 
+from xdp_form_cli.field_truth import FieldMatch
+
 
 XDP_NS = "http://ns.adobe.com/xdp/"
 
@@ -69,6 +71,18 @@ class XdpEditor:
     def field_names(self, page_name: str) -> list[str]:
         page = self._find_page_subform(page_name)
         return [field.get("name", "") for field in self._child_fields(page)]
+
+    def convert_field_names(self, matcher) -> list[FieldMatch]:
+        matches: list[FieldMatch] = []
+        for field in self._iter_all_fields():
+            original_name = field.get("name", "").strip()
+            if not original_name:
+                continue
+            match = matcher(original_name)
+            if match.changed:
+                field.set("name", match.canonical_name)
+            matches.append(match)
+        return matches
 
     def replace_page_from_fragment(
         self, page_name: str, fragment_path: str | Path
@@ -146,6 +160,9 @@ class XdpEditor:
 
     def _child_fields(self, page: etree._Element) -> list[etree._Element]:
         return [child for child in page if _local_name(child) == "field"]
+
+    def _iter_all_fields(self) -> list[etree._Element]:
+        return [element for element in self.root.iter() if _local_name(element) == "field"]
 
     def _parse_fragment(self, fragment_path: str | Path) -> etree._Element:
         raw = Path(fragment_path).read_bytes().strip()

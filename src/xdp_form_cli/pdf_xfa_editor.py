@@ -6,6 +6,7 @@ from pathlib import Path
 import pikepdf
 from pikepdf import Array, Name, Stream
 
+from xdp_form_cli.field_truth import FieldMatch
 from xdp_form_cli.xdp_editor import PageSummary, XdpEditor
 
 
@@ -34,6 +35,9 @@ class PdfXfaEditor:
 
     def replace_page_from_fragment(self, page_name: str, fragment_path: str | Path) -> None:
         self.xdp.replace_page_from_fragment(page_name, fragment_path)
+
+    def convert_field_names(self, matcher) -> list[FieldMatch]:
+        return self.xdp.convert_field_names(matcher)
 
     def save_copy(self, output_path: str | Path) -> Path:
         output = Path(output_path)
