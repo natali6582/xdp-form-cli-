@@ -9,6 +9,7 @@ The tool is fund-agnostic. Do not encode investment fund, real-estate fund, or d
 - Lists page subforms such as `Page1`, `Page26`, `Page33`
 - Lists fields inside a page
 - Replaces one page subform from an XML fragment file
+- Creates AcroForm fields over static PDFs from a CSV field specification
 - Converts embedded field names to canonical names extracted from the Plan-T code file
 - Treats explicitly approved visually-filled fields as known fields
 - Can supplement the known field list from accepted mechanized XML/XDP/TXT examples
@@ -60,6 +61,23 @@ Replace a page inside a PDF with embedded XFA and write a new PDF:
 xdp-form-cli replace-page --input "C:\path\form.pdf" --page Page26 --fragment "C:\path\Page26.xml" --output "C:\path\form_copy.pdf"
 ```
 
+Create AcroForm fields over a static PDF:
+
+```powershell
+xdp-form-cli create-acroform --input "C:\path\static.pdf" --fields "C:\path\field-spec.csv" --output "C:\path\static_with_fields.pdf"
+```
+
+Field-spec CSV format:
+
+```csv
+page,name,type,x,y,w,h,value
+1,txtInvestorName,text,120,650,240,18,
+1,chkQualifiedInvestor,checkbox,92,610,12,12,0
+1,txtNotes,textarea,120,520,320,60,
+```
+
+Coordinates are PDF points from the bottom-left of the page.
+
 Convert field names in a PDF using the default Plan-T code file:
 
 ```powershell
@@ -97,9 +115,10 @@ Example:
 
 - Do not pretty-print the output XML. This tool writes compact XML to reduce layout and formatting risk.
 - PDF support requires a real embedded XFA packet at `/Root` -> `/AcroForm` -> `/XFA`.
+- Static PDFs do not contain field names or coordinates. Use `create-acroform` with a field-spec CSV to add real AcroForm fields before trying to fill or validate fields.
 - `convert-fields` uses the `PDFFormsBL*plan-t.cs` file by default unless `--truth-code` is provided.
 - `approved_visual_fields.py` contains fields that are considered valid because they are filled visually in accepted forms.
 - Example files are supplemental, not a blind import. Only field names that look like Plan-T data fields (`txt...`, `chk...`, `img...`) are added. Generic LiveCycle names such as `CheckBox20` are ignored.
 - The conversion is conservative. Exact known names stay as-is, clear canonical reductions are renamed, and uncertain names remain unchanged and appear in the report.
 - Encrypted, signed, certified, or Reader-extended PDFs may reject edits or lose validation/signature status after saving a modified copy.
-- This tool edits the XFA XML. It does not redraw static PDF page content or convert XFA forms into AcroForms.
+- This tool edits existing XFA XML when present. For static PDFs, it can create AcroForm fields from explicit coordinates, but it does not infer field placement automatically.

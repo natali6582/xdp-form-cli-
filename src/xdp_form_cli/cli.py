@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from xdp_form_cli import __version__
+from xdp_form_cli.acroform_builder import create_acroform_pdf
 from xdp_form_cli.approved_visual_fields import APPROVED_VISUAL_FIELDS
 from xdp_form_cli import colors
 from xdp_form_cli.field_conversion import convert_editor_fields
@@ -45,6 +46,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         required=True,
         help="Path to the new output XDP/XML/PDF file. Must not be the source file.",
+    )
+
+    create_acroform = subparsers.add_parser(
+        "create-acroform",
+        help="Create a new PDF copy with AcroForm fields from a CSV field specification.",
+    )
+    create_acroform.add_argument("--input", required=True, help="Path to the source static PDF file.")
+    create_acroform.add_argument(
+        "--fields",
+        required=True,
+        help="CSV with columns: page,name,type,x,y,w,h,value. Coordinates are PDF points from the bottom-left.",
+    )
+    create_acroform.add_argument(
+        "--output",
+        required=True,
+        help="Path to the new output PDF file. Must not be the source file.",
     )
 
     convert_fields = subparsers.add_parser(
@@ -141,6 +158,19 @@ def cmd_replace_page(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_create_acroform(args: argparse.Namespace) -> int:
+    if args.input == args.output:
+        raise ValueError("--output must be a new file path, not the source file.")
+    if not _is_pdf(args.input) or not _is_pdf(args.output):
+        raise ValueError("create-acroform only supports PDF input and PDF output.")
+
+    colors.step(f"Loading static PDF input: {args.input}")
+    colors.step(f"Loading field specification: {args.fields}")
+    output, count = create_acroform_pdf(args.input, args.fields, args.output)
+    colors.success(f"Saved AcroForm PDF copy with {count} field(s): {output}")
+    return 0
+
+
 def cmd_convert_fields(args: argparse.Namespace) -> int:
     if args.input == args.output:
         raise ValueError("--output must be a new file path, not the source file.")
@@ -197,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_list_fields(args)
         if args.command == "replace-page":
             return cmd_replace_page(args)
+        if args.command == "create-acroform":
+            return cmd_create_acroform(args)
         if args.command == "convert-fields":
             return cmd_convert_fields(args)
         parser.error(f"Unsupported command: {args.command}")
