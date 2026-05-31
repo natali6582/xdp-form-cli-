@@ -10,6 +10,8 @@ from xdp_form_cli.field_truth import FieldMatch
 
 
 XDP_NS = "http://ns.adobe.com/xdp/"
+XFA_TEMPLATE_NS = "http://www.xfa.org/schema/xfa-template/2.5/"
+DEFAULT_FIELD_FONT = "Arial"
 
 
 def _local_name(element: etree._Element) -> str:
@@ -81,6 +83,7 @@ class XdpEditor:
             match = matcher(original_name)
             if match.changed:
                 field.set("name", match.canonical_name)
+                self._ensure_field_font(field)
             matches.append(match)
         return matches
 
@@ -104,6 +107,7 @@ class XdpEditor:
             raise ValueError(f"Could not find parent for page '{page_name}'.")
 
         replacement = etree.fromstring(etree.tostring(fragment_root))
+        self._ensure_fields_font(replacement)
         parent.replace(target_page, replacement)
 
     def write_copy(self, output_path: str | Path) -> Path:
@@ -169,3 +173,26 @@ class XdpEditor:
         if not raw:
             raise ValueError("Fragment file is empty.")
         return etree.fromstring(raw)
+
+    def _ensure_fields_font(self, root: etree._Element) -> None:
+        for field in root.iter():
+            if _local_name(field) == "field":
+                self._ensure_field_font(field)
+
+    def _ensure_field_font(self, field: etree._Element) -> None:
+        font = None
+        for child in field:
+            if _local_name(child) == "font":
+                font = child
+                break
+
+        if font is None:
+            font = etree.Element(f"{{{XFA_TEMPLATE_NS}}}font")
+            insert_at = 0
+            for index, child in enumerate(field):
+                if _local_name(child) == "ui":
+                    insert_at = index + 1
+                    break
+            field.insert(insert_at, font)
+
+        font.set("typeface", DEFAULT_FIELD_FONT)

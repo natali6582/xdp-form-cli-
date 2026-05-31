@@ -8,6 +8,10 @@ import pikepdf
 from pikepdf import Array, Dictionary, Name, String
 
 
+ACROFORM_FONT_RESOURCE = "Arial"
+ACROFORM_DEFAULT_APPEARANCE = f"/{ACROFORM_FONT_RESOURCE} 10 Tf 0 g"
+
+
 @dataclass
 class AcroFieldSpec:
     page: int
@@ -94,14 +98,14 @@ def _ensure_acroform(pdf: pikepdf.Pdf) -> Dictionary:
 
     acroform[Name("/NeedAppearances")] = True
     if Name("/DA") not in acroform:
-        acroform[Name("/DA")] = String("/Helv 10 Tf 0 g")
+        acroform[Name("/DA")] = String(ACROFORM_DEFAULT_APPEARANCE)
     if Name("/DR") not in acroform:
         acroform[Name("/DR")] = Dictionary(
             Font=Dictionary(
-                Helv=Dictionary(
+                Arial=Dictionary(
                     Type=Name("/Font"),
                     Subtype=Name("/Type1"),
-                    BaseFont=Name("/Helvetica"),
+                    BaseFont=Name("/Arial"),
                 )
             )
         )
@@ -123,7 +127,7 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
 
     if spec.field_type in {"text", "tx", "textarea"}:
         widget[Name("/FT")] = Name("/Tx")
-        widget[Name("/DA")] = String("/Helv 10 Tf 0 g")
+        widget[Name("/DA")] = String(ACROFORM_DEFAULT_APPEARANCE)
         if spec.field_type == "textarea":
             widget[Name("/Ff")] = 4096
         if spec.value:

@@ -11,6 +11,7 @@ The tool is fund-agnostic. Do not encode investment fund, real-estate fund, or d
 - Replaces one page subform from an XML fragment file
 - Creates AcroForm fields over static PDFs from a CSV field specification
 - Converts embedded field names to canonical names extracted from the Plan-T code file
+- Forces generated or modified fields to use Arial
 - Treats explicitly approved visually-filled fields as known fields
 - Can supplement the known field list from accepted mechanized XML/XDP/TXT examples
 - Preserves the source file by always writing to a new output file
@@ -114,6 +115,7 @@ Example:
 ## Notes
 
 - Do not pretty-print the output XML. This tool writes compact XML to reduce layout and formatting risk.
+- Any field created or modified by the tool should use Arial. Avoid LiveCycle/default fonts such as Myriad Pro in generated field XML.
 - PDF support requires a real embedded XFA packet at `/Root` -> `/AcroForm` -> `/XFA`.
 - Static PDFs do not contain field names or coordinates. Use `create-acroform` with a field-spec CSV to add real AcroForm fields before trying to fill or validate fields.
 - `convert-fields` uses the `PDFFormsBL*plan-t.cs` file by default unless `--truth-code` is provided.
