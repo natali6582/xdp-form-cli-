@@ -5,8 +5,10 @@ import sys
 from pathlib import Path
 
 from xdp_form_cli import __version__
+from xdp_form_cli.approved_visual_fields import APPROVED_VISUAL_FIELDS
 from xdp_form_cli import colors
 from xdp_form_cli.field_conversion import convert_editor_fields
+from xdp_form_cli.field_examples import add_example_fields_to_truth
 from xdp_form_cli.field_truth import FieldTruth
 from xdp_form_cli.pdf_xfa_editor import PdfXfaEditor
 from xdp_form_cli.xdp_editor import XdpEditor
@@ -55,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--truth-code",
         default=None,
         help="Optional override for the canonical Plan-T code file. Defaults to PDFFormsBL*plan-t.cs near the workspace.",
+    )
+    convert_fields.add_argument(
+        "--examples",
+        action="append",
+        default=[],
+        help="Optional XML/XDP/TXT example file or directory accepted by the system. Can be repeated.",
     )
     convert_fields.add_argument(
         "--report",
@@ -140,10 +148,23 @@ def cmd_convert_fields(args: argparse.Namespace) -> int:
         raise ValueError("Input and output must use the same file type, for example PDF to PDF.")
 
     truth = FieldTruth(args.truth_code) if args.truth_code else FieldTruth.default()
+    colors.step(f"Loading source-of-truth fields: {truth.code_path}")
+    colors.info(f"Loaded {truth.count} fields from the Plan-T code file.")
+
+    approved_added = truth.add_names(set(APPROVED_VISUAL_FIELDS), source="approved-visual")
+    colors.info(
+        f"Loaded {len(APPROVED_VISUAL_FIELDS)} approved visual field(s); added={approved_added}."
+    )
+
+    if args.examples:
+        examples = add_example_fields_to_truth(truth, args.examples)
+        colors.info(
+            f"Loaded {examples.files} example file(s): discovered={examples.discovered}, accepted-style={examples.accepted_style}, added={examples.added}."
+        )
+
     colors.step(f"Loading input: {args.input}")
     editor = _load_editor(args.input)
     try:
-        colors.step(f"Loading source-of-truth fields: {truth.code_path}")
         report = convert_editor_fields(editor, truth)
         colors.info(
             f"Processed {report.total_fields} fields. Known={report.exact_or_known}, renamed={report.renamed}, unmatched={report.unmatched}."

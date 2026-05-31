@@ -26,9 +26,11 @@ class FieldTruth:
         source = self.code_path.read_text(encoding="utf-8-sig", errors="ignore")
         names = sorted(set(_FIELD_TOKEN_RE.findall(source)))
 
-        self.names = names
-        self.name_set = set(names)
-        self.casefold_map = {name.casefold(): name for name in names}
+        self.names: list[str] = []
+        self.name_set: set[str] = set()
+        self.casefold_map: dict[str, str] = {}
+        self.source_map: dict[str, str] = {}
+        self.add_names(names, source="code")
 
     @classmethod
     def default(cls) -> "FieldTruth":
@@ -54,12 +56,14 @@ class FieldTruth:
         for candidate, method in self._candidate_names(raw):
             exact = self._exact_match(candidate)
             if exact is not None:
+                canonical, source = exact
+                match_method = method if source == "code" else f"{method}:{source}"
                 return FieldMatch(
                     original_name=raw,
-                    canonical_name=exact,
+                    canonical_name=canonical,
                     matched=True,
-                    changed=exact != raw,
-                    method=method,
+                    changed=canonical != raw,
+                    method=match_method,
                 )
 
         return FieldMatch(
@@ -69,6 +73,30 @@ class FieldTruth:
             changed=False,
             method="unmatched",
         )
+
+    def add_names(self, names: list[str] | set[str], source: str) -> int:
+        added = 0
+        for name in sorted(set(names)):
+            clean = name.strip()
+            if not clean:
+                continue
+
+            if clean not in self.name_set:
+                self.names.append(clean)
+                self.name_set.add(clean)
+                added += 1
+
+            key = clean.casefold()
+            if key not in self.casefold_map:
+                self.casefold_map[key] = clean
+                self.source_map[key] = source
+
+        self.names.sort()
+        return added
+
+    @property
+    def count(self) -> int:
+        return len(self.name_set)
 
     def _candidate_names(self, field_name: str) -> list[tuple[str, str]]:
         candidates: list[tuple[str, str]] = []
@@ -103,7 +131,12 @@ class FieldTruth:
 
         return candidates
 
-    def _exact_match(self, candidate: str) -> str | None:
+    def _exact_match(self, candidate: str) -> tuple[str, str] | None:
         if candidate in self.name_set:
-            return candidate
-        return self.casefold_map.get(candidate.casefold())
+            return candidate, self.source_map.get(candidate.casefold(), "code")
+
+        key = candidate.casefold()
+        canonical = self.casefold_map.get(key)
+        if canonical is None:
+            return None
+        return canonical, self.source_map.get(key, "code")

@@ -8,3 +8,5 @@ dist/
 build/
 *.egg-info/
 examples/*_copy.*
+examples/*.pdf
+examples/*_report.csv
