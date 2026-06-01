@@ -10,8 +10,6 @@ The tool is fund-agnostic. Do not encode investment fund, real-estate fund, or d
 - Lists fields inside a page
 - Replaces one page subform from an XML fragment file
 - Creates AcroForm fields over static PDFs from a CSV field specification
-- Validates field specs and generated PDFs before/after AcroForm creation
-- Generates text and image fields as transparent widgets so they do not cover original PDF text
 - Converts embedded field names to canonical names extracted from the Plan-T code file
 - Forces generated or modified fields to use Arial
 - Treats explicitly approved visually-filled fields as known fields
@@ -77,30 +75,10 @@ page,name,type,x,y,w,h,value
 1,txtInvestorName,text,120,650,240,18,
 1,chkQualifiedInvestor,checkbox,92,610,12,12,0
 1,txtNotes,textarea,120,520,320,60,
-1,imgInvestorSignature,image,120,470,180,28,
+1,imgInvestorSignature,signature,120,470,180,28,
 ```
 
-Supported field types are `text`, `textarea`, `checkbox`, and `image`. All signature placeholders, including names such as `imgPersonSignature`, must use `type=image`; real PDF digital-signature fields (`/Sig`) are intentionally not supported. Coordinates are PDF points from the bottom-left of the page.
-
-Validate a field-spec CSV before creating a PDF:
-
-```powershell
-xdp-form-cli validate-acroform --input "C:\path\static.pdf" --fields "C:\path\field-spec.csv"
-```
-
-Validate both the CSV and an already generated PDF:
-
-```powershell
-xdp-form-cli validate-acroform --input "C:\path\static.pdf" --fields "C:\path\field-spec.csv" --pdf "C:\path\static_with_fields.pdf"
-```
-
-Use strict validation when duplicate names and other warnings should fail the command:
-
-```powershell
-xdp-form-cli validate-acroform --input "C:\path\static.pdf" --fields "C:\path\field-spec.csv" --pdf "C:\path\static_with_fields.pdf" --strict
-```
-
-`create-acroform` runs validation automatically before and after creating the output PDF. Add `--strict-validation` when warnings should block creation. If `pdftoppm` and Pillow are available, validation also renders the source PDF and warns when a field rectangle appears to sit on existing dark content, which can indicate that the field may overlap original text.
+Supported field types are `text`, `textarea`, `checkbox`, `image`, and `signature`. Use `image` for signature images such as `imgPersonSignature`; use `signature` only for real digital-signature fields. Coordinates are PDF points from the bottom-left of the page.
 
 Convert field names in a PDF using the default Plan-T code file:
 
@@ -135,26 +113,15 @@ Example:
 </subform>
 ```
 
-## Optional placement-analysis dependencies
-
-The standalone underline-detection prototype uses optional `Pillow` and `numpy` dependencies. Install them with:
-
-```powershell
-python -m pip install -e .[placement]
-```
-
-If these libraries are missing, placement analysis must warn and skip rather than hard-crashing. This check is not wired into validation until its detection results are approved.
-
 ## Notes
 
 - Do not pretty-print the output XML. This tool writes compact XML to reduce layout and formatting risk.
 - Any field created or modified by the tool should use Arial. Avoid LiveCycle/default fonts such as Myriad Pro in generated field XML.
 - PDF support requires a real embedded XFA packet at `/Root` -> `/AcroForm` -> `/XFA`.
 - Static PDFs do not contain field names or coordinates. Use `create-acroform` with a field-spec CSV to add real AcroForm fields before trying to fill or validate fields.
-- Validation checks required cells, supported types, duplicate names, duplicate signature names, image-signature format, field sizes, page bounds, repeated beneficiary table rows, likely overlap with original text, PDF field count, transparent text/image widgets, checkbox appearances, and unexpected `/Sig` digital-signature fields.
 - `convert-fields` uses the `PDFFormsBL*plan-t.cs` file by default unless `--truth-code` is provided.
 - `approved_visual_fields.py` contains fields that are considered valid because they are filled visually in accepted forms.
 - Example files are supplemental, not a blind import. Only field names that look like Plan-T data fields (`txt...`, `chk...`, `img...`) are added. Generic LiveCycle names such as `CheckBox20` are ignored.
 - The conversion is conservative. Exact known names stay as-is, clear canonical reductions are renamed, and uncertain names remain unchanged and appear in the report.
-- Encrypted, signed, certified, or Reader-extended PDFs may reject edits or lose validation/signature status after saving a modified copy. Real PDF digital-signature fields are rejected; signatures are represented as image fields only.
+- Encrypted, signed, certified, or Reader-extended PDFs may reject edits or lose validation/signature status after saving a modified copy.
 - This tool edits existing XFA XML when present. For static PDFs, it can create AcroForm fields from explicit coordinates, but it does not infer field placement automatically.
