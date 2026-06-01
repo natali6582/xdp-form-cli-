@@ -6,9 +6,10 @@ from pathlib import Path
 
 from xdp_form_cli import __version__
 from xdp_form_cli.acroform_builder import create_acroform_pdf
+from xdp_form_cli.acroform_normalizer import detect_pdf_form_kind, normalize_existing_acroform_pdf
 from xdp_form_cli.approved_visual_fields import APPROVED_VISUAL_FIELDS
 from xdp_form_cli import colors
-from xdp_form_cli.field_conversion import convert_editor_fields
+from xdp_form_cli.field_conversion import build_report, convert_editor_fields
 from xdp_form_cli.field_examples import add_example_fields_to_truth
 from xdp_form_cli.field_truth import FieldTruth
 from xdp_form_cli.field_validation import ValidationIssue, ValidationResult, validate_acroform
@@ -68,6 +69,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-validation",
         action="store_true",
         help="Fail create-acroform on validation warnings, not only errors.",
+    )
+
+    prepare_pdf = subparsers.add_parser(
+        "prepare-pdf",
+        help="Adaptively prepare a PDF copy: normalize existing XFA/AcroForm fields or create fields from CSV for static PDFs.",
+    )
+    prepare_pdf.add_argument("--input", required=True, help="Path to the source PDF file.")
+    prepare_pdf.add_argument("--output", required=True, help="Path to the new output PDF file.")
+    prepare_pdf.add_argument(
+        "--fields",
+        default=None,
+        help="Optional CSV field spec. Used only when the input PDF has no existing editable fields.",
+    )
+    prepare_pdf.add_argument(
+        "--truth-code",
+        default=None,
+        help="Optional override for the canonical Plan-T code file. Defaults to PDFFormsBL*plan-t.cs near the workspace.",
+    )
+    prepare_pdf.add_argument(
+        "--examples",
+        action="append",
+        default=[],
+        help="Optional XML/XDP/TXT example file or directory accepted by the system. Can be repeated.",
+    )
+    prepare_pdf.add_argument(
+        "--report",
+        default=None,
+        help="Optional CSV report path with original and canonical field names.",
+    )
+    prepare_pdf.add_argument(
+        "--strict-validation",
+        action="store_true",
+        help="When --fields is used, fail on validation warnings, not only errors.",
     )
 
     validate_acroform_parser = subparsers.add_parser(
@@ -212,6 +246,70 @@ def cmd_create_acroform(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prepare_pdf(args: argparse.Namespace) -> int:
+    if args.input == args.output:
+        raise ValueError("--output must be a new file path, not the source file.")
+    if not _is_pdf(args.input) or not _is_pdf(args.output):
+        raise ValueError("prepare-pdf only supports PDF input and PDF output.")
+
+    colors.step(f"Inspecting PDF input: {args.input}")
+    form_kind = detect_pdf_form_kind(args.input)
+    colors.info(f"Detected PDF form type: {form_kind}.")
+
+    if form_kind == "static":
+        if not args.fields:
+            raise ValueError(
+                "This PDF has no existing XFA or AcroForm fields. Provide --fields CSV so the tool can create fields."
+            )
+        colors.step("No existing editable fields found; creating AcroForm fields from CSV.")
+        create_args = argparse.Namespace(
+            input=args.input,
+            output=args.output,
+            fields=args.fields,
+            strict_validation=args.strict_validation,
+        )
+        return cmd_create_acroform(create_args)
+
+    truth = _load_truth(args)
+
+    if form_kind == "xfa":
+        colors.step("Normalizing embedded XFA fields.")
+        editor = PdfXfaEditor(args.input)
+        try:
+            normalized_count = editor.normalize_fields()
+            report = convert_editor_fields(editor, truth)
+            colors.info(
+                f"Processed {report.total_fields} XFA field(s). Known={report.exact_or_known}, renamed={report.renamed}, unmatched={report.unmatched}."
+            )
+            colors.info(f"Normalized Arial font on {normalized_count} XFA field(s).")
+            colors.step(f"Writing output copy: {args.output}")
+            output = editor.save_copy(args.output)
+            colors.success(f"Saved prepared XFA PDF copy: {output}")
+            if args.report:
+                report_path = report.write_csv(args.report)
+                colors.success(f"Saved conversion report: {report_path}")
+        finally:
+            editor.close()
+        return 0
+
+    colors.step("Normalizing existing AcroForm fields.")
+    normalize_report = normalize_existing_acroform_pdf(args.input, args.output, matcher=truth.match)
+    conversion_report = build_report(normalize_report.matches)
+    colors.info(
+        f"Processed {normalize_report.field_count} AcroForm field object(s). "
+        f"Known={conversion_report.exact_or_known}, renamed={normalize_report.renamed}, unmatched={conversion_report.unmatched}."
+    )
+    colors.info(
+        f"Normalized font={normalize_report.font_normalized}, transparent={normalize_report.transparent_normalized}, "
+        f"image-signature={normalize_report.image_signature_normalized}."
+    )
+    colors.success(f"Saved prepared AcroForm PDF copy: {normalize_report.output_path}")
+    if args.report:
+        report_path = conversion_report.write_csv(args.report)
+        colors.success(f"Saved conversion report: {report_path}")
+    return 0
+
+
 def cmd_validate_acroform(args: argparse.Namespace) -> int:
     colors.step(f"Validating field specification: {args.fields}")
     if args.input:
@@ -230,20 +328,7 @@ def cmd_convert_fields(args: argparse.Namespace) -> int:
     if _is_pdf(args.input) != _is_pdf(args.output):
         raise ValueError("Input and output must use the same file type, for example PDF to PDF.")
 
-    truth = FieldTruth(args.truth_code) if args.truth_code else FieldTruth.default()
-    colors.step(f"Loading source-of-truth fields: {truth.code_path}")
-    colors.info(f"Loaded {truth.count} fields from the Plan-T code file.")
-
-    approved_added = truth.add_names(set(APPROVED_VISUAL_FIELDS), source="approved-visual")
-    colors.info(
-        f"Loaded {len(APPROVED_VISUAL_FIELDS)} approved visual field(s); added={approved_added}."
-    )
-
-    if args.examples:
-        examples = add_example_fields_to_truth(truth, args.examples)
-        colors.info(
-            f"Loaded {examples.files} example file(s): discovered={examples.discovered}, accepted-style={examples.accepted_style}, added={examples.added}."
-        )
+    truth = _load_truth(args)
 
     colors.step(f"Loading input: {args.input}")
     editor = _load_editor(args.input)
@@ -282,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_replace_page(args)
         if args.command == "create-acroform":
             return cmd_create_acroform(args)
+        if args.command == "prepare-pdf":
+            return cmd_prepare_pdf(args)
         if args.command == "validate-acroform":
             return cmd_validate_acroform(args)
         if args.command == "convert-fields":
@@ -291,6 +378,26 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         colors.error(str(exc))
         return 1
+
+
+def _load_truth(args: argparse.Namespace) -> FieldTruth:
+    truth = FieldTruth(args.truth_code) if getattr(args, "truth_code", None) else FieldTruth.default()
+    colors.step(f"Loading source-of-truth fields: {truth.code_path}")
+    colors.info(f"Loaded {truth.count} fields from the Plan-T code file.")
+
+    approved_added = truth.add_names(set(APPROVED_VISUAL_FIELDS), source="approved-visual")
+    colors.info(
+        f"Loaded {len(APPROVED_VISUAL_FIELDS)} approved visual field(s); added={approved_added}."
+    )
+
+    examples_arg = getattr(args, "examples", [])
+    if examples_arg:
+        examples = add_example_fields_to_truth(truth, examples_arg)
+        colors.info(
+            f"Loaded {examples.files} example file(s): discovered={examples.discovered}, accepted-style={examples.accepted_style}, added={examples.added}."
+        )
+
+    return truth
 
 
 def _print_validation_result(result: ValidationResult, *, strict: bool, title: str) -> None:
