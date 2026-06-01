@@ -10,8 +10,6 @@ The tool is fund-agnostic. Do not encode investment fund, real-estate fund, or d
 - Lists fields inside a page
 - Replaces one page subform from an XML fragment file
 - Creates AcroForm fields over static PDFs from a CSV field specification
-- Adaptively prepares PDF copies by detecting XFA, existing AcroForm, or static PDFs
-- Auto-fits normal single-line text fields to compact 12pt rectangles so they do not visually overrun nearby text
 - Validates field specs and generated PDFs before/after AcroForm creation
 - Generates text and image fields as transparent widgets so they do not cover original PDF text
 - Converts embedded field names to canonical names extracted from the Plan-T code file
@@ -71,28 +69,6 @@ Create AcroForm fields over a static PDF:
 ```powershell
 xdp-form-cli create-acroform --input "C:\path\static.pdf" --fields "C:\path\field-spec.csv" --output "C:\path\static_with_fields.pdf"
 ```
-
-By default, `create-acroform` fits normal single-line text fields to compact 12pt rectangles. `textarea`, image/signature fields, checkboxes, and beneficiary table rows keep their specified height. Add `--preserve-field-rects` only when you intentionally need the exact CSV rectangles.
-
-Prepare any PDF form copy with automatic detection:
-
-```powershell
-xdp-form-cli prepare-pdf --input "C:\path\input.pdf" --output "C:\path\input_prepared.pdf" --report "C:\path\input_prepared_report.csv"
-```
-
-`prepare-pdf` chooses the workflow by file contents:
-
-- Embedded XFA PDF: normalize all XFA fields to Arial, convert known names to Plan-T canonical names, and save a new PDF.
-- Existing AcroForm PDF: normalize text field appearance to Arial/transparent, normalize image-signature pushbutton fields, convert known names, and save a new PDF.
-- Static PDF with no editable fields: create AcroForm fields only when `--fields` CSV is supplied.
-
-Prepare a static PDF by adding fields from CSV:
-
-```powershell
-xdp-form-cli prepare-pdf --input "C:\path\static.pdf" --fields "C:\path\field-spec.csv" --output "C:\path\static_with_fields.pdf"
-```
-
-When `prepare-pdf` creates fields from CSV, it uses the same single-line text fitting policy. Add `--preserve-field-rects` to bypass that policy.
 
 Field-spec CSV format:
 
@@ -165,8 +141,6 @@ Example:
 - Any field created or modified by the tool should use Arial. Avoid LiveCycle/default fonts such as Myriad Pro in generated field XML.
 - PDF support requires a real embedded XFA packet at `/Root` -> `/AcroForm` -> `/XFA`.
 - Static PDFs do not contain field names or coordinates. Use `create-acroform` with a field-spec CSV to add real AcroForm fields before trying to fill or validate fields.
-- Use `prepare-pdf` when the file type is not known in advance. It preserves existing behavior by routing XFA, AcroForm, and static PDFs to the appropriate workflow.
-- The default field-layout policy favors small, centered, single-line text rectangles. Do not solve text overflow by making ordinary line fields tall; use `textarea` only for real multi-line areas.
 - Validation checks required cells, supported types, duplicate names, duplicate signature names, image-signature format, field sizes, page bounds, repeated beneficiary table rows, likely overlap with original text, PDF field count, transparent text/image widgets, checkbox appearances, and unexpected `/Sig` digital-signature fields.
 - `convert-fields` uses the `PDFFormsBL*plan-t.cs` file by default unless `--truth-code` is provided.
 - `approved_visual_fields.py` contains fields that are considered valid because they are filled visually in accepted forms.

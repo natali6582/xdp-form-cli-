@@ -87,13 +87,6 @@ class XdpEditor:
             matches.append(match)
         return matches
 
-    def normalize_fields(self) -> int:
-        count = 0
-        for field in self._iter_all_fields():
-            self._ensure_field_font(field)
-            count += 1
-        return count
-
     def replace_page_from_fragment(
         self, page_name: str, fragment_path: str | Path
     ) -> None:
