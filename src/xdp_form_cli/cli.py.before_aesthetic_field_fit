@@ -70,11 +70,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail create-acroform on validation warnings, not only errors.",
     )
-    create_acroform.add_argument(
-        "--preserve-field-rects",
-        action="store_true",
-        help="Use the exact CSV rectangles without automatic single-line text fitting.",
-    )
 
     prepare_pdf = subparsers.add_parser(
         "prepare-pdf",
@@ -113,11 +108,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="When --fields is used, fail on validation warnings, not only errors.",
     )
-    prepare_pdf.add_argument(
-        "--preserve-field-rects",
-        action="store_true",
-        help="When --fields is used, keep exact CSV rectangles without automatic single-line text fitting.",
-    )
 
     validate_acroform_parser = subparsers.add_parser(
         "validate-acroform",
@@ -142,11 +132,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict",
         action="store_true",
         help="Return a failure exit code when warnings are found.",
-    )
-    validate_acroform_parser.add_argument(
-        "--preserve-field-rects",
-        action="store_true",
-        help="Validate exact CSV rectangles without automatic single-line text fitting.",
     )
 
     convert_fields = subparsers.add_parser(
@@ -251,31 +236,15 @@ def cmd_create_acroform(args: argparse.Namespace) -> int:
 
     colors.step(f"Loading static PDF input: {args.input}")
     colors.step(f"Loading field specification: {args.fields}")
-    precheck = validate_acroform(
-        args.fields,
-        input_pdf=args.input,
-        auto_fit_fields=not args.preserve_field_rects,
-    )
+    precheck = validate_acroform(args.fields, input_pdf=args.input)
     _print_validation_result(precheck, strict=args.strict_validation, title="Pre-create validation")
     if precheck.has_failures(strict=args.strict_validation):
         raise ValueError("Validation failed. Fix the field specification before creating the PDF.")
 
-    if not args.preserve_field_rects:
-        colors.info("Auto-fitting single-line text fields to compact 12pt rectangles.")
-    output, count = create_acroform_pdf(
-        args.input,
-        args.fields,
-        args.output,
-        auto_fit_fields=not args.preserve_field_rects,
-    )
+    output, count = create_acroform_pdf(args.input, args.fields, args.output)
     colors.success(f"Saved AcroForm PDF copy with {count} field(s): {output}")
 
-    postcheck = validate_acroform(
-        args.fields,
-        input_pdf=args.input,
-        output_pdf=output,
-        auto_fit_fields=not args.preserve_field_rects,
-    )
+    postcheck = validate_acroform(args.fields, input_pdf=args.input, output_pdf=output)
     _print_validation_result(postcheck, strict=args.strict_validation, title="Post-create PDF validation")
     if postcheck.has_failures(strict=args.strict_validation):
         raise ValueError("Generated PDF failed validation.")
@@ -303,7 +272,6 @@ def cmd_prepare_pdf(args: argparse.Namespace) -> int:
             output=args.output,
             fields=args.fields,
             strict_validation=args.strict_validation,
-            preserve_field_rects=args.preserve_field_rects,
         )
         return cmd_create_acroform(create_args)
 
@@ -367,12 +335,7 @@ def cmd_validate_acroform(args: argparse.Namespace) -> int:
     if args.pdf:
         colors.info(f"Using generated PDF for AcroForm checks: {args.pdf}")
 
-    result = validate_acroform(
-        args.fields,
-        input_pdf=args.input,
-        output_pdf=args.pdf,
-        auto_fit_fields=not args.preserve_field_rects,
-    )
+    result = validate_acroform(args.fields, input_pdf=args.input, output_pdf=args.pdf)
     _print_validation_result(result, strict=args.strict, title="Validation")
     return 1 if result.has_failures(strict=args.strict) else 0
 

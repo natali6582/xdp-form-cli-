@@ -11,8 +11,6 @@ from pathlib import Path
 
 import pikepdf
 
-from xdp_form_cli.field_layout import fit_field_rect
-
 
 REQUIRED_COLUMNS = ("page", "name", "type", "x", "y", "w", "h")
 OPTIONAL_COLUMNS = ("value",)
@@ -76,9 +74,8 @@ def validate_acroform(
     *,
     input_pdf: str | Path | None = None,
     output_pdf: str | Path | None = None,
-    auto_fit_fields: bool = True,
 ) -> ValidationResult:
-    fields, issues = _parse_field_specs(fields_path, auto_fit_fields=auto_fit_fields)
+    fields, issues = _parse_field_specs(fields_path)
     if fields:
         issues.extend(_validate_field_specs(fields, input_pdf=input_pdf))
     if output_pdf is not None:
@@ -86,7 +83,7 @@ def validate_acroform(
     return ValidationResult(fields=fields, issues=issues)
 
 
-def _parse_field_specs(fields_path: str | Path, *, auto_fit_fields: bool = True) -> tuple[list[ParsedField], list[ValidationIssue]]:
+def _parse_field_specs(fields_path: str | Path) -> tuple[list[ParsedField], list[ValidationIssue]]:
     path = Path(fields_path)
     issues: list[ValidationIssue] = []
     fields: list[ParsedField] = []
@@ -148,17 +145,15 @@ def _parse_field_specs(fields_path: str | Path, *, auto_fit_fields: bool = True)
                 )
                 continue
 
-            normalized_type = _normalize_type(field_type)
-            fitted = fit_field_rect(name, normalized_type, x, y, w, h) if auto_fit_fields else None
             fields.append(
                 ParsedField(
                     page=page,
                     name=name,
-                    field_type=normalized_type,
-                    x=fitted.x if fitted is not None else x,
-                    y=fitted.y if fitted is not None else y,
-                    w=fitted.w if fitted is not None else w,
-                    h=fitted.h if fitted is not None else h,
+                    field_type=_normalize_type(field_type),
+                    x=x,
+                    y=y,
+                    w=w,
+                    h=h,
                     value=(row.get("value") or "").strip(),
                 )
             )

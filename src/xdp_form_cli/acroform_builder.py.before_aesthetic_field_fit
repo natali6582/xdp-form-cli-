@@ -8,8 +8,6 @@ from pathlib import Path
 import pikepdf
 from pikepdf import Array, Dictionary, Name, Stream, String
 
-from xdp_form_cli.field_layout import fit_field_rect
-
 
 ACROFORM_FONT_RESOURCE = "Arial"
 ACROFORM_DEFAULT_APPEARANCE = f"/{ACROFORM_FONT_RESOURCE} 10 Tf 0 g"
@@ -40,19 +38,13 @@ class AcroFieldSpec:
     value: str = ""
 
 
-def create_acroform_pdf(
-    input_path: str | Path,
-    fields_path: str | Path,
-    output_path: str | Path,
-    *,
-    auto_fit_fields: bool = True,
-) -> tuple[Path, int]:
+def create_acroform_pdf(input_path: str | Path, fields_path: str | Path, output_path: str | Path) -> tuple[Path, int]:
     source = Path(input_path)
     output = Path(output_path)
     if output.resolve() == source.resolve():
         raise ValueError("--output must be a new PDF file path, not the source PDF.")
 
-    specs = load_field_specs(fields_path, auto_fit_fields=auto_fit_fields)
+    specs = load_field_specs(fields_path)
     with pikepdf.Pdf.open(str(source)) as pdf:
         acroform = _ensure_acroform(pdf)
         if Name("/Fields") not in acroform:
@@ -76,7 +68,7 @@ def create_acroform_pdf(
     return output, len(specs)
 
 
-def load_field_specs(fields_path: str | Path, *, auto_fit_fields: bool = True) -> list[AcroFieldSpec]:
+def load_field_specs(fields_path: str | Path) -> list[AcroFieldSpec]:
     path = Path(fields_path)
     specs: list[AcroFieldSpec] = []
 
@@ -92,39 +84,24 @@ def load_field_specs(fields_path: str | Path, *, auto_fit_fields: bool = True) -
             if not name:
                 raise ValueError(f"Field spec row {row_number} has an empty name.")
 
-            spec = AcroFieldSpec(
-                page=_parse_int(row, "page", row_number),
-                name=name,
-                field_type=(row.get("type") or "text").strip().lower(),
-                x=_parse_float(row, "x", row_number),
-                y=_parse_float(row, "y", row_number),
-                w=_parse_float(row, "w", row_number),
-                h=_parse_float(row, "h", row_number),
-                value=(row.get("value") or "").strip(),
+            specs.append(
+                AcroFieldSpec(
+                    page=_parse_int(row, "page", row_number),
+                    name=name,
+                    field_type=(row.get("type") or "text").strip().lower(),
+                    x=_parse_float(row, "x", row_number),
+                    y=_parse_float(row, "y", row_number),
+                    w=_parse_float(row, "w", row_number),
+                    h=_parse_float(row, "h", row_number),
+                    value=(row.get("value") or "").strip(),
+                )
             )
-            specs.append(_fit_spec(spec) if auto_fit_fields else spec)
 
     if not specs:
         raise ValueError("Field spec CSV contains no fields.")
 
     _validate_repeated_table_rows(specs)
     return specs
-
-
-def _fit_spec(spec: AcroFieldSpec) -> AcroFieldSpec:
-    rect = fit_field_rect(spec.name, spec.field_type, spec.x, spec.y, spec.w, spec.h)
-    if not rect.changed:
-        return spec
-    return AcroFieldSpec(
-        page=spec.page,
-        name=spec.name,
-        field_type=spec.field_type,
-        x=rect.x,
-        y=rect.y,
-        w=rect.w,
-        h=rect.h,
-        value=spec.value,
-    )
 
 
 def _ensure_acroform(pdf: pikepdf.Pdf) -> Dictionary:
