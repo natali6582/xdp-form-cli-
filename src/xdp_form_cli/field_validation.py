@@ -509,6 +509,16 @@ def _validate_output_pdf(output_pdf: str | Path, fields: list[ParsedField]) -> l
                         ValidationIssue("ERROR", "pdf-image-signature-format", "Image signature field must be a pushbutton /Btn with flag 65536.", field=name)
                     )
             flags = int(pdf_field.get("/Ff", 0))
+            if field_type == "/Tx" or (field_type == "/Btn" and (flags & 65536)):
+                if _has_visible_fill_or_border(pdf_field):
+                    issues.append(
+                        ValidationIssue(
+                            "ERROR",
+                            "pdf-field-covers-original-content",
+                            "Text/image fields must be transparent: no visible border and no background fill.",
+                            field=name,
+                        )
+                    )
             if field_type == "/Btn" and not (flags & 65536) and "checkbox" in spec_types_by_name.get(name, set()):
                 normal = (pdf_field.get("/AP") or {}).get("/N") if pdf_field.get("/AP") else None
                 normal_keys = set(normal.keys()) if normal is not None else set()
@@ -535,3 +545,19 @@ def _normalize_type(field_type: str) -> str:
 def _is_image_signature_name(name: str) -> bool:
     lowered = name.lower()
     return lowered.startswith("img") and "signature" in lowered
+
+
+def _has_visible_fill_or_border(pdf_field: object) -> bool:
+    border = pdf_field.get("/Border")
+    if border is not None and len(border) >= 3 and float(border[2]) != 0:
+        return True
+
+    border_style = pdf_field.get("/BS")
+    if border_style is not None and float(border_style.get("/W", 0)) != 0:
+        return True
+
+    appearance = pdf_field.get("/MK")
+    if appearance is not None and ("/BG" in appearance or "/BC" in appearance):
+        return True
+
+    return False
