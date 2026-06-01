@@ -12,6 +12,7 @@ from xdp_form_cli.field_conversion import convert_editor_fields
 from xdp_form_cli.field_examples import add_example_fields_to_truth
 from xdp_form_cli.field_truth import FieldTruth
 from xdp_form_cli.field_validation import ValidationIssue, ValidationResult, validate_acroform
+from xdp_form_cli.acroform_reader import PdfAcroFormEditor
 from xdp_form_cli.pdf_xfa_editor import PdfXfaEditor
 from xdp_form_cli.xdp_editor import XdpEditor
 
@@ -125,10 +126,22 @@ def _is_pdf(path: str) -> bool:
     return Path(path).suffix.lower() == ".pdf"
 
 
-def _load_editor(input_path: str) -> XdpEditor | PdfXfaEditor:
+def _pdf_has_xfa(input_path: str) -> bool:
+    import pikepdf
+    from pikepdf import Name
+
+    with pikepdf.Pdf.open(input_path) as pdf:
+        acroform = pdf.Root.get(Name("/AcroForm"))
+        return acroform is not None and Name("/XFA") in acroform
+
+
+def _load_editor(input_path: str) -> XdpEditor | PdfXfaEditor | PdfAcroFormEditor:
     if _is_pdf(input_path):
-        colors.info("Detected PDF input; using embedded XFA editor.")
-        return PdfXfaEditor(input_path)
+        if _pdf_has_xfa(input_path):
+            colors.info("Detected PDF input with embedded XFA; using XFA editor.")
+            return PdfXfaEditor(input_path)
+        colors.info("Detected plain AcroForm PDF (no XFA); using AcroForm reader.")
+        return PdfAcroFormEditor(input_path)
     colors.info("Detected standalone XML/XDP input.")
     return XdpEditor(input_path)
 
