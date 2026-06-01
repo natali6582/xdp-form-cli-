@@ -78,7 +78,7 @@ page,name,type,x,y,w,h,value
 1,imgInvestorSignature,signature,120,470,180,28,
 ```
 
-Supported field types are `text`, `textarea`, `checkbox`, and `signature`. Coordinates are PDF points from the bottom-left of the page.
+Supported field types are `text`, `textarea`, `checkbox`, `image`, and `signature`. Use `image` for signature images such as `imgPersonSignature`; use `signature` only for real digital-signature fields. Coordinates are PDF points from the bottom-left of the page.
 
 Convert field names in a PDF using the default Plan-T code file:
 

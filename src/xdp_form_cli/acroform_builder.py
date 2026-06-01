@@ -140,12 +140,18 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
         widget[Name("/AS")] = widget[Name("/V")]
         return pdf.make_indirect(widget)
 
-    if spec.field_type in {"signature", "sig", "image", "img"}:
+    if spec.field_type in {"image", "img"}:
+        widget[Name("/FT")] = Name("/Btn")
+        # Pushbutton widgets are the closest AcroForm placeholder for image injection.
+        widget[Name("/Ff")] = 65536
+        return pdf.make_indirect(widget)
+
+    if spec.field_type in {"signature", "sig"}:
         widget[Name("/FT")] = Name("/Sig")
         return pdf.make_indirect(widget)
 
     raise ValueError(
-        f"Unsupported field type for {spec.name}: {spec.field_type}. Use text, textarea, checkbox, or signature."
+        f"Unsupported field type for {spec.name}: {spec.field_type}. Use text, textarea, checkbox, image, or signature."
     )
 
 

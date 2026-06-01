@@ -20,6 +20,7 @@ APPROVED_VISUAL_FIELDS = (
     "chkTypeOfInvestorRetirementAccount",
     "chkTypeOfInvestorRevocableTrust",
     "imgAttorneyCPAStamp",
+    "imgMusmahSignature",
     "imgSubscriberSignature",
     "imgWitnessSignature",
     "txtABA",
