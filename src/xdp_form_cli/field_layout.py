@@ -24,7 +24,7 @@ def fit_field_rect(name: str, field_type: str, x: float, y: float, w: float, h: 
         return FieldRect(x, y, w, h, False)
 
     fitted_h = SINGLE_LINE_TEXT_MAX_HEIGHT
-    fitted_y = y + h
+    fitted_y = y
     return FieldRect(x, fitted_y, w, fitted_h, True)
 
 
