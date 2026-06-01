@@ -197,7 +197,10 @@ def _extract_text_anchors(page: pikepdf.Page) -> list[TextAnchor]:
     tx = ty = 0.0
     for token in pikepdf.parse_content_stream(page):
         op = str(token.operator)
-        if op in ("Tm", "Td", "TD"):
+        if op == "BT":
+            # Text matrix resets to the identity at the start of each text object.
+            tx = ty = 0.0
+        elif op in ("Tm", "Td", "TD"):
             try:
                 values = [float(v) for v in token.operands]
             except (TypeError, ValueError):
