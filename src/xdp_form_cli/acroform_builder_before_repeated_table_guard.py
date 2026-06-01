@@ -10,14 +10,6 @@ from pikepdf import Array, Dictionary, Name, Stream, String
 
 ACROFORM_FONT_RESOURCE = "Arial"
 ACROFORM_DEFAULT_APPEARANCE = f"/{ACROFORM_FONT_RESOURCE} 10 Tf 0 g"
-BENEFICIARY_TABLE_COLUMNS = (
-    "Name",
-    "ID",
-    "DOB",
-    "CitizenshipCountry",
-    "TaxResidencyCountry",
-    "BenefitPercent",
-)
 
 
 @dataclass
@@ -94,7 +86,6 @@ def load_field_specs(fields_path: str | Path) -> list[AcroFieldSpec]:
     if not specs:
         raise ValueError("Field spec CSV contains no fields.")
 
-    _validate_repeated_table_rows(specs)
     return specs
 
 
@@ -187,29 +178,6 @@ def _parse_float(row: dict[str, str], column: str, row_number: int) -> float:
 
 def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "checked", "v"}
-
-
-def _validate_repeated_table_rows(specs: list[AcroFieldSpec]) -> None:
-    names_by_page: dict[int, set[str]] = {}
-    for spec in specs:
-        names_by_page.setdefault(spec.page, set()).add(spec.name)
-
-    for page, names in names_by_page.items():
-        first_row = {f"txtBeneficiary1{column}" for column in BENEFICIARY_TABLE_COLUMNS}
-        if not first_row.issubset(names):
-            continue
-
-        missing = [
-            f"txtBeneficiary{row}{column}"
-            for row in (2, 3)
-            for column in BENEFICIARY_TABLE_COLUMNS
-            if f"txtBeneficiary{row}{column}" not in names
-        ]
-        if missing:
-            raise ValueError(
-                f"Page {page} has a beneficiary table, but missing repeated row field(s): "
-                + ", ".join(missing)
-            )
 
 
 def _checkbox_appearance(pdf: pikepdf.Pdf, width: float, height: float, *, checked: bool) -> Stream:
