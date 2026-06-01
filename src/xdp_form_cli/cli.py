@@ -191,7 +191,7 @@ def cmd_replace_page(args: argparse.Namespace) -> int:
         colors.step(f"Replacing {args.page} from fragment: {args.fragment}")
         editor.replace_page_from_fragment(args.page, args.fragment)
         colors.step(f"Writing output copy: {args.output}")
-        if isinstance(editor, PdfXfaEditor):
+        if isinstance(editor, (PdfXfaEditor, PdfAcroFormEditor)):
             output = editor.save_copy(args.output)
             colors.success(f"Saved updated PDF copy: {output}")
         else:
@@ -267,7 +267,7 @@ def cmd_convert_fields(args: argparse.Namespace) -> int:
         )
 
         colors.step(f"Writing output copy: {args.output}")
-        if isinstance(editor, PdfXfaEditor):
+        if isinstance(editor, (PdfXfaEditor, PdfAcroFormEditor)):
             output = editor.save_copy(args.output)
             colors.success(f"Saved updated PDF copy: {output}")
         else:
