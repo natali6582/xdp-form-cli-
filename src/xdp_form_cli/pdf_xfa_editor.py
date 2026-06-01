@@ -39,6 +39,9 @@ class PdfXfaEditor:
     def convert_field_names(self, matcher) -> list[FieldMatch]:
         return self.xdp.convert_field_names(matcher)
 
+    def normalize_fields(self) -> int:
+        return self.xdp.normalize_fields()
+
     def save_copy(self, output_path: str | Path) -> Path:
         output = Path(output_path)
         if output.resolve() == self.source_path.resolve():
