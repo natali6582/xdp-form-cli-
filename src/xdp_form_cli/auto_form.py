@@ -249,13 +249,33 @@ def _nearest_label(box: DetectedBox, anchors: list[TextAnchor]) -> str:
 
 
 def _is_signature_label(label: str) -> bool:
+    if not _looks_like_text(label):
+        return False
     lowered = label.lower()
     return any(keyword in lowered for keyword in SIGNATURE_KEYWORDS)
 
 
+def _looks_like_text(label: str) -> bool:
+    """Reject labels that are clearly font-encoding noise, not real words.
+
+    Some PDFs use custom font encodings where the raw content-stream bytes do
+    not decode to readable characters. Such labels are dominated by digits or
+    have no real word, so they should fall back to generic field names.
+    """
+    letters = sum(ch.isalpha() for ch in label)
+    digits = sum(ch.isdigit() for ch in label)
+    if letters < 3:
+        return False
+    if digits and digits / (letters + digits) > 0.2:
+        return False
+    return True
+
+
 def _field_base_name(label: str, is_signature: bool) -> str:
-    slug = re.sub(r"[^A-Za-z0-9]+", "", label.title())
     prefix = "img" if is_signature else "txt"
+    if not _looks_like_text(label):
+        return f"{prefix}Field"
+    slug = re.sub(r"[^A-Za-z0-9]+", "", label.title())
     if not slug:
         return f"{prefix}Field"
     return f"{prefix}{slug[:32]}"
