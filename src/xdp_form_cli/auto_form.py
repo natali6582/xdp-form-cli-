@@ -120,49 +120,18 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
                 is_signature = _is_signature_label(label)
                 base = _field_base_name(label, is_signature)
                 name = _unique_name(base, used_names)
-                box_y, box_h = _inset_below_top_label(box, anchors)
                 specs.append(
                     AutoFieldSpec(
                         page=box.page,
                         name=name,
                         field_type="image" if is_signature else "text",
                         x=round(box.x, 2),
-                        y=round(box_y, 2),
+                        y=round(box.y, 2),
                         w=round(box.w, 2),
-                        h=round(box_h, 2),
+                        h=round(box.h, 2),
                     )
                 )
     return specs
-
-
-def _inset_below_top_label(
-    box: DetectedBox, anchors: list[TextAnchor]
-) -> tuple[float, float]:
-    """Shrink a box from the top so its field does not cover an inside-cell label.
-
-    Returns the (y, h) to use. If a text anchor sits inside the top region of the
-    box, the field's top edge is lowered to just below that label; otherwise the
-    full box height is kept.
-    """
-    box_top = box.y + box.h
-    top_third = box.y + box.h * (2.0 / 3.0)
-    within_16 = box_top - 16.0
-
-    inside_labels = [
-        anchor.y
-        for anchor in anchors
-        if box.x <= anchor.x <= box.x + box.w
-        and box.y <= anchor.y <= box_top
-        and (anchor.y >= top_third or anchor.y >= within_16)
-    ]
-    if not inside_labels:
-        return box.y, box.h
-
-    new_top = min(inside_labels) - 2.0
-    new_h = new_top - box.y
-    if new_h < MIN_BOX_HEIGHT_PT:
-        return box.y, box.h
-    return box.y, new_h
 
 
 def write_field_csv(specs: list[AutoFieldSpec], csv_path: str | Path) -> Path:
