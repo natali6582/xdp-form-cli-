@@ -11,6 +11,7 @@ from pikepdf import Array, Dictionary, Name, Stream, String
 
 ACROFORM_FONT_RESOURCE = "Arial"
 ACROFORM_DEFAULT_APPEARANCE = f"/{ACROFORM_FONT_RESOURCE} 10 Tf 0 g"
+SUPPORTED_TYPES = {"text", "tx", "textarea", "checkbox", "check", "chk", "image", "img"}
 BENEFICIARY_TABLE_COLUMNS = (
     "Name",
     "ID",
@@ -46,6 +47,7 @@ def create_acroform_pdf(input_path: str | Path, fields_path: str | Path, output_
 
     specs = load_field_specs(fields_path)
     with pikepdf.Pdf.open(str(source)) as pdf:
+        _ensure_no_real_signature_fields(pdf)
         acroform = _ensure_acroform(pdf)
         if Name("/Fields") not in acroform:
             acroform[Name("/Fields")] = Array()
@@ -84,11 +86,13 @@ def load_field_specs(fields_path: str | Path) -> list[AcroFieldSpec]:
             if not name:
                 raise ValueError(f"Field spec row {row_number} has an empty name.")
 
+            field_type = (row.get("type") or "text").strip().lower()
+            _validate_field_type(name, field_type, row_number)
             specs.append(
                 AcroFieldSpec(
                     page=_parse_int(row, "page", row_number),
                     name=name,
-                    field_type=(row.get("type") or "text").strip().lower(),
+                    field_type=field_type,
                     x=_parse_float(row, "x", row_number),
                     y=_parse_float(row, "y", row_number),
                     w=_parse_float(row, "w", row_number),
@@ -158,6 +162,10 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
         widget[Name("/AS")] = widget[Name("/V")]
         widget[Name("/AP")] = Dictionary(
             N=Dictionary(
+                Off=_make_empty_appearance(pdf, spec.w, spec.h),
+                Yes=_make_checkbox_yes_appearance(pdf, spec.w, spec.h),
+            )
+        )
                 Off=_checkbox_appearance(pdf, spec.w, spec.h, checked=False),
                 Yes=_checkbox_appearance(pdf, spec.w, spec.h, checked=True),
             )
@@ -169,6 +177,7 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
         widget[Name("/FT")] = Name("/Btn")
         # Pushbutton widgets are the closest AcroForm placeholder for image injection.
         widget[Name("/Ff")] = 65536
+        widget[Name("/AP")] = Dictionary(N=_make_empty_appearance(pdf, spec.w, spec.h))
         widget[Name("/AP")] = Dictionary(N=_transparent_appearance(pdf, spec.w, spec.h))
         return pdf.make_indirect(widget)
 
@@ -177,8 +186,68 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
         return pdf.make_indirect(widget)
 
     raise ValueError(
-        f"Unsupported field type for {spec.name}: {spec.field_type}. Use text, textarea, checkbox, image, or signature."
+        f"Unsupported field type for {spec.name}: {spec.field_type}. Use text, textarea, checkbox, or image."
     )
+
+
+def _validate_field_type(name: str, field_type: str, row_number: int) -> None:
+    if field_type in {"signature", "sig"}:
+        raise ValueError(
+            f"Field spec row {row_number} uses {field_type}; signature fields must use type=image."
+        )
+    if field_type not in SUPPORTED_TYPES:
+        raise ValueError(
+            f"Unsupported field type for {name}: {field_type}. Use text, textarea, checkbox, or image."
+        )
+    if _is_image_signature_name(name) and field_type not in {"image", "img"}:
+        raise ValueError(f"Field {name} is an img...Signature field and must use type=image.")
+
+
+def _is_image_signature_name(name: str) -> bool:
+    normalized = name.lower()
+    return normalized.startswith("img") and "signature" in normalized
+
+
+def _ensure_no_real_signature_fields(pdf: pikepdf.Pdf) -> None:
+    acroform = pdf.Root.get(Name("/AcroForm"))
+    if acroform is None:
+        return
+    for field in acroform.get(Name("/Fields"), []):
+        if _field_tree_contains_signature(field):
+            raise ValueError("PDF contains a real PDF signature field (/Sig); signatures must be image fields.")
+
+
+def _field_tree_contains_signature(field: object) -> bool:
+    if not isinstance(field, Dictionary):
+        return False
+    if field.get(Name("/FT")) == Name("/Sig"):
+        return True
+    return any(_field_tree_contains_signature(child) for child in field.get(Name("/Kids"), []))
+
+
+def _make_empty_appearance(pdf: pikepdf.Pdf, width: float, height: float) -> pikepdf.Stream:
+    return _make_appearance_stream(pdf, b"", width, height)
+
+
+def _make_checkbox_yes_appearance(pdf: pikepdf.Pdf, width: float, height: float) -> pikepdf.Stream:
+    x0 = max(1.0, width * 0.18)
+    y0 = max(1.0, height * 0.50)
+    x1 = max(x0 + 1.0, width * 0.42)
+    y1 = max(1.0, height * 0.22)
+    x2 = max(x1 + 1.0, width * 0.82)
+    y2 = max(y0 + 1.0, height * 0.82)
+    commands = f"q 1.4 w 0 0 0 RG {x0:.2f} {y0:.2f} m {x1:.2f} {y1:.2f} l {x2:.2f} {y2:.2f} l S Q"
+    return _make_appearance_stream(pdf, commands.encode("ascii"), width, height)
+
+
+def _make_appearance_stream(pdf: pikepdf.Pdf, data: bytes, width: float, height: float) -> pikepdf.Stream:
+    stream = pikepdf.Stream(pdf, data)
+    stream[Name("/Type")] = Name("/XObject")
+    stream[Name("/Subtype")] = Name("/Form")
+    stream[Name("/FormType")] = 1
+    stream[Name("/BBox")] = Array([0, 0, width, height])
+    stream[Name("/Resources")] = Dictionary()
+    return pdf.make_indirect(stream)
 
 
 def _parse_int(row: dict[str, str], column: str, row_number: int) -> int:

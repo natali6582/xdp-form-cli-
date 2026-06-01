@@ -80,7 +80,7 @@ page,name,type,x,y,w,h,value
 1,imgInvestorSignature,image,120,470,180,28,
 ```
 
-Supported field types are `text`, `textarea`, `checkbox`, `image`, and `signature`. Use `image` for signature images such as `imgPersonSignature`; use `signature` only for real digital-signature fields. Coordinates are PDF points from the bottom-left of the page.
+Supported field types are `text`, `textarea`, `checkbox`, and `image`. All signature placeholders, including names such as `imgPersonSignature`, must use `type=image`; real PDF digital-signature fields (`/Sig`) are intentionally not supported. Coordinates are PDF points from the bottom-left of the page.
 
 Validate a field-spec CSV before creating a PDF:
 
@@ -135,6 +135,16 @@ Example:
 </subform>
 ```
 
+## Optional placement-analysis dependencies
+
+The standalone underline-detection prototype uses optional `Pillow` and `numpy` dependencies. Install them with:
+
+```powershell
+python -m pip install -e .[placement]
+```
+
+If these libraries are missing, placement analysis must warn and skip rather than hard-crashing. This check is not wired into validation until its detection results are approved.
+
 ## Notes
 
 - Do not pretty-print the output XML. This tool writes compact XML to reduce layout and formatting risk.
@@ -146,5 +156,5 @@ Example:
 - `approved_visual_fields.py` contains fields that are considered valid because they are filled visually in accepted forms.
 - Example files are supplemental, not a blind import. Only field names that look like Plan-T data fields (`txt...`, `chk...`, `img...`) are added. Generic LiveCycle names such as `CheckBox20` are ignored.
 - The conversion is conservative. Exact known names stay as-is, clear canonical reductions are renamed, and uncertain names remain unchanged and appear in the report.
-- Encrypted, signed, certified, or Reader-extended PDFs may reject edits or lose validation/signature status after saving a modified copy.
+- Encrypted, signed, certified, or Reader-extended PDFs may reject edits or lose validation/signature status after saving a modified copy. Real PDF digital-signature fields are rejected; signatures are represented as image fields only.
 - This tool edits existing XFA XML when present. For static PDFs, it can create AcroForm fields from explicit coordinates, but it does not infer field placement automatically.
