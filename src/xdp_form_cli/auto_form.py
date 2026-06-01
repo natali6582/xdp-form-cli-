@@ -151,7 +151,8 @@ def _resolve_source(source: str | Path, work_dir: Path) -> Path:
     parsed = urlparse(text)
     if parsed.scheme in ("http", "https"):
         return _download_pdf(text, work_dir / "source.pdf")
-    if parsed.scheme in ("", "file"):
+    # A single-letter scheme is a Windows drive letter (C:\...), not a URL.
+    if parsed.scheme in ("", "file") or len(parsed.scheme) == 1:
         local = Path(parsed.path if parsed.scheme == "file" else text)
         if not local.is_file():
             raise ValueError(f"Source PDF not found: {local}")
