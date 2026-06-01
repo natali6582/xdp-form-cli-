@@ -12,8 +12,10 @@ from xdp_form_cli.field_conversion import convert_editor_fields
 from xdp_form_cli.field_examples import add_example_fields_to_truth
 from xdp_form_cli.field_truth import FieldTruth
 from xdp_form_cli.field_validation import ValidationIssue, ValidationResult, validate_acroform
+from xdp_form_cli.acroform_reader import PdfAcroFormEditor
 from xdp_form_cli.pdf_xfa_editor import PdfXfaEditor
 from xdp_form_cli.xdp_editor import XdpEditor
+from xdp_form_cli.xfa_stripper import strip_xfa
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +49,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         required=True,
         help="Path to the new output XDP/XML/PDF file. Must not be the source file.",
+    )
+
+    strip_xfa_parser = subparsers.add_parser(
+        "strip-xfa",
+        help="Remove the embedded XFA packet and write a plain, fillable AcroForm PDF copy.",
+    )
+    strip_xfa_parser.add_argument("--input", required=True, help="Path to the source PDF with embedded XFA.")
+    strip_xfa_parser.add_argument(
+        "--output",
+        required=True,
+        help="Path to the new output PDF file. Must not be the source file.",
+    )
+    strip_xfa_parser.add_argument(
+        "--fields",
+        default=None,
+        help="Optional CSV (page,name,type,x,y,w,h,value) to place AcroForm fields after stripping XFA.",
+    )
+    strip_xfa_parser.add_argument(
+        "--strict-validation",
+        action="store_true",
+        help="With --fields, fail on validation warnings, not only errors.",
     )
 
     create_acroform = subparsers.add_parser(
@@ -125,10 +148,22 @@ def _is_pdf(path: str) -> bool:
     return Path(path).suffix.lower() == ".pdf"
 
 
-def _load_editor(input_path: str) -> XdpEditor | PdfXfaEditor:
+def _pdf_has_xfa(input_path: str) -> bool:
+    import pikepdf
+    from pikepdf import Name
+
+    with pikepdf.Pdf.open(input_path) as pdf:
+        acroform = pdf.Root.get(Name("/AcroForm"))
+        return acroform is not None and Name("/XFA") in acroform
+
+
+def _load_editor(input_path: str) -> XdpEditor | PdfXfaEditor | PdfAcroFormEditor:
     if _is_pdf(input_path):
-        colors.info("Detected PDF input; using embedded XFA editor.")
-        return PdfXfaEditor(input_path)
+        if _pdf_has_xfa(input_path):
+            colors.info("Detected PDF input with embedded XFA; using XFA editor.")
+            return PdfXfaEditor(input_path)
+        colors.info("Detected plain AcroForm PDF (no XFA); using AcroForm reader.")
+        return PdfAcroFormEditor(input_path)
     colors.info("Detected standalone XML/XDP input.")
     return XdpEditor(input_path)
 
@@ -178,7 +213,7 @@ def cmd_replace_page(args: argparse.Namespace) -> int:
         colors.step(f"Replacing {args.page} from fragment: {args.fragment}")
         editor.replace_page_from_fragment(args.page, args.fragment)
         colors.step(f"Writing output copy: {args.output}")
-        if isinstance(editor, PdfXfaEditor):
+        if isinstance(editor, (PdfXfaEditor, PdfAcroFormEditor)):
             output = editor.save_copy(args.output)
             colors.success(f"Saved updated PDF copy: {output}")
         else:
@@ -186,6 +221,49 @@ def cmd_replace_page(args: argparse.Namespace) -> int:
             colors.success(f"Saved updated XDP/XML copy: {output}")
     finally:
         _close_editor(editor)
+    return 0
+
+
+def cmd_strip_xfa(args: argparse.Namespace) -> int:
+    if args.input == args.output:
+        raise ValueError("--output must be a new file path, not the source file.")
+    if not _is_pdf(args.input) or not _is_pdf(args.output):
+        raise ValueError("strip-xfa only supports PDF input and PDF output.")
+
+    colors.step(f"Loading PDF input: {args.input}")
+
+    if args.fields:
+        # Strip XFA to a temporary PDF, then place fields onto the plain AcroForm.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stripped = Path(tmp_dir) / "stripped.pdf"
+            _, had_xfa = strip_xfa(args.input, stripped)
+            if had_xfa:
+                colors.success("Removed embedded XFA packet.")
+            else:
+                colors.warn("No XFA packet found; input was already a plain AcroForm.")
+
+            colors.step(f"Loading field specification: {args.fields}")
+            precheck = validate_acroform(args.fields, input_pdf=str(stripped))
+            _print_validation_result(precheck, strict=args.strict_validation, title="Pre-create validation")
+            if precheck.has_failures(strict=args.strict_validation):
+                raise ValueError("Validation failed. Fix the field specification before creating the PDF.")
+
+            output, count = create_acroform_pdf(str(stripped), args.fields, args.output)
+            colors.success(f"Saved fillable AcroForm PDF with {count} field(s): {output}")
+
+            postcheck = validate_acroform(args.fields, input_pdf=str(stripped), output_pdf=output)
+            _print_validation_result(postcheck, strict=args.strict_validation, title="Post-create PDF validation")
+            if postcheck.has_failures(strict=args.strict_validation):
+                raise ValueError("Generated PDF failed validation.")
+        return 0
+
+    output, had_xfa = strip_xfa(args.input, args.output)
+    if had_xfa:
+        colors.success(f"Removed embedded XFA; saved plain AcroForm PDF copy: {output}")
+    else:
+        colors.warn(f"No XFA packet found; saved AcroForm PDF copy unchanged: {output}")
     return 0
 
 
@@ -254,7 +332,7 @@ def cmd_convert_fields(args: argparse.Namespace) -> int:
         )
 
         colors.step(f"Writing output copy: {args.output}")
-        if isinstance(editor, PdfXfaEditor):
+        if isinstance(editor, (PdfXfaEditor, PdfAcroFormEditor)):
             output = editor.save_copy(args.output)
             colors.success(f"Saved updated PDF copy: {output}")
         else:
@@ -280,6 +358,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_list_fields(args)
         if args.command == "replace-page":
             return cmd_replace_page(args)
+        if args.command == "strip-xfa":
+            return cmd_strip_xfa(args)
         if args.command == "create-acroform":
             return cmd_create_acroform(args)
         if args.command == "validate-acroform":

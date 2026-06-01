@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pikepdf
-from pikepdf import Array, Dictionary, Name, Stream, String
+from pikepdf import Array, Dictionary, Name, String
 
 
 ACROFORM_FONT_RESOURCE = "Arial"
@@ -55,7 +55,9 @@ def create_acroform_pdf(input_path: str | Path, fields_path: str | Path, output_
 
         for spec in specs:
             if spec.page < 1 or spec.page > len(pdf.pages):
-                raise ValueError(f"Field {spec.name} references page {spec.page}, but PDF has {len(pdf.pages)} page(s).")
+                raise ValueError(
+                    f"Field {spec.name} references page {spec.page}, but PDF has {len(pdf.pages)} page(s)."
+                )
 
             page = pdf.pages[spec.page - 1]
             field = _build_widget(pdf, page.obj, spec)
@@ -133,6 +135,8 @@ def _ensure_acroform(pdf: pikepdf.Pdf) -> Dictionary:
 
 def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -> Dictionary:
     rect = Array([spec.x, spec.y, spec.x + spec.w, spec.y + spec.h])
+    # Transparent base: no visible border, no background fill, so a generated
+    # field never paints over the original label or underline beneath it.
     widget = Dictionary(
         Type=Name("/Annot"),
         Subtype=Name("/Widget"),
@@ -155,19 +159,13 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
 
     if spec.field_type in {"checkbox", "check", "chk"}:
         widget[Name("/FT")] = Name("/Btn")
-        widget[Name("/Border")] = Array([0, 0, 1])
-        widget[Name("/BS")] = Dictionary(W=1, S=Name("/S"))
-        widget[Name("/MK")] = Dictionary(BC=Array([0, 0, 0]))
         widget[Name("/V")] = Name("/Yes") if _truthy(spec.value) else Name("/Off")
         widget[Name("/AS")] = widget[Name("/V")]
+        # Off = empty (do not paint over the form's printed box); Yes = checkmark only.
         widget[Name("/AP")] = Dictionary(
             N=Dictionary(
                 Off=_make_empty_appearance(pdf, spec.w, spec.h),
                 Yes=_make_checkbox_yes_appearance(pdf, spec.w, spec.h),
-            )
-        )
-                Off=_checkbox_appearance(pdf, spec.w, spec.h, checked=False),
-                Yes=_checkbox_appearance(pdf, spec.w, spec.h, checked=True),
             )
         )
         widget[Name("/H")] = Name("/N")
@@ -178,11 +176,6 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
         # Pushbutton widgets are the closest AcroForm placeholder for image injection.
         widget[Name("/Ff")] = 65536
         widget[Name("/AP")] = Dictionary(N=_make_empty_appearance(pdf, spec.w, spec.h))
-        widget[Name("/AP")] = Dictionary(N=_transparent_appearance(pdf, spec.w, spec.h))
-        return pdf.make_indirect(widget)
-
-    if spec.field_type in {"signature", "sig"}:
-        widget[Name("/FT")] = Name("/Sig")
         return pdf.make_indirect(widget)
 
     raise ValueError(
@@ -304,39 +297,3 @@ def _validate_repeated_table_rows(specs: list[AcroFieldSpec]) -> None:
                 f"Page {page} has a beneficiary table, but only {len(complete_rows)} complete row(s). "
                 "Add fields for all visible table rows."
             )
-
-
-def _checkbox_appearance(pdf: pikepdf.Pdf, width: float, height: float, *, checked: bool) -> Stream:
-    w = max(float(width), 6.0)
-    h = max(float(height), 6.0)
-    border = f"q 1 w 0 0 0 RG 1 1 {w - 2:.3f} {h - 2:.3f} re S Q\n"
-    mark = ""
-    if checked:
-        mark = (
-            f"q 1.4 w 0 0 0 RG "
-            f"{w * 0.22:.3f} {h * 0.48:.3f} m "
-            f"{w * 0.43:.3f} {h * 0.24:.3f} l "
-            f"{w * 0.78:.3f} {h * 0.76:.3f} l S Q\n"
-        )
-
-    return Stream(
-        pdf,
-        (border + mark).encode("ascii"),
-        Type=Name("/XObject"),
-        Subtype=Name("/Form"),
-        BBox=Array([0, 0, w, h]),
-        Matrix=Array([1, 0, 0, 1, 0, 0]),
-    )
-
-
-def _transparent_appearance(pdf: pikepdf.Pdf, width: float, height: float) -> Stream:
-    w = max(float(width), 1.0)
-    h = max(float(height), 1.0)
-    return Stream(
-        pdf,
-        b"",
-        Type=Name("/XObject"),
-        Subtype=Name("/Form"),
-        BBox=Array([0, 0, w, h]),
-        Matrix=Array([1, 0, 0, 1, 0, 0]),
-    )
