@@ -136,8 +136,8 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
         Rect=rect,
         F=4,
         P=page_obj,
-        Border=Array([0, 0, 0]),
-        BS=Dictionary(W=0, S=Name("/S")),
+        BS=Dictionary(W=1, S=Name("/S")),
+        MK=Dictionary(BC=Array([0, 0, 0]), BG=Array([1, 1, 1])),
     )
 
     if spec.field_type in {"text", "tx", "textarea"}:
@@ -151,9 +151,6 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
 
     if spec.field_type in {"checkbox", "check", "chk"}:
         widget[Name("/FT")] = Name("/Btn")
-        widget[Name("/Border")] = Array([0, 0, 1])
-        widget[Name("/BS")] = Dictionary(W=1, S=Name("/S"))
-        widget[Name("/MK")] = Dictionary(BC=Array([0, 0, 0]))
         widget[Name("/V")] = Name("/Yes") if _truthy(spec.value) else Name("/Off")
         widget[Name("/AS")] = widget[Name("/V")]
         widget[Name("/AP")] = Dictionary(
@@ -169,7 +166,6 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
         widget[Name("/FT")] = Name("/Btn")
         # Pushbutton widgets are the closest AcroForm placeholder for image injection.
         widget[Name("/Ff")] = 65536
-        widget[Name("/AP")] = Dictionary(N=_transparent_appearance(pdf, spec.w, spec.h))
         return pdf.make_indirect(widget)
 
     if spec.field_type in {"signature", "sig"}:
@@ -253,19 +249,6 @@ def _checkbox_appearance(pdf: pikepdf.Pdf, width: float, height: float, *, check
     return Stream(
         pdf,
         (border + mark).encode("ascii"),
-        Type=Name("/XObject"),
-        Subtype=Name("/Form"),
-        BBox=Array([0, 0, w, h]),
-        Matrix=Array([1, 0, 0, 1, 0, 0]),
-    )
-
-
-def _transparent_appearance(pdf: pikepdf.Pdf, width: float, height: float) -> Stream:
-    w = max(float(width), 1.0)
-    h = max(float(height), 1.0)
-    return Stream(
-        pdf,
-        b"",
         Type=Name("/XObject"),
         Subtype=Name("/Form"),
         BBox=Array([0, 0, w, h]),

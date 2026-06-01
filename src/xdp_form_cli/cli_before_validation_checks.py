@@ -11,7 +11,6 @@ from xdp_form_cli import colors
 from xdp_form_cli.field_conversion import convert_editor_fields
 from xdp_form_cli.field_examples import add_example_fields_to_truth
 from xdp_form_cli.field_truth import FieldTruth
-from xdp_form_cli.field_validation import ValidationIssue, ValidationResult, validate_acroform
 from xdp_form_cli.pdf_xfa_editor import PdfXfaEditor
 from xdp_form_cli.xdp_editor import XdpEditor
 
@@ -63,36 +62,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         required=True,
         help="Path to the new output PDF file. Must not be the source file.",
-    )
-    create_acroform.add_argument(
-        "--strict-validation",
-        action="store_true",
-        help="Fail create-acroform on validation warnings, not only errors.",
-    )
-
-    validate_acroform_parser = subparsers.add_parser(
-        "validate-acroform",
-        help="Validate a field-spec CSV and optionally the generated AcroForm PDF.",
-    )
-    validate_acroform_parser.add_argument(
-        "--fields",
-        required=True,
-        help="CSV with columns: page,name,type,x,y,w,h,value.",
-    )
-    validate_acroform_parser.add_argument(
-        "--input",
-        default=None,
-        help="Optional source PDF used to validate page count and page bounds.",
-    )
-    validate_acroform_parser.add_argument(
-        "--pdf",
-        default=None,
-        help="Optional generated PDF used to validate AcroForm field structure.",
-    )
-    validate_acroform_parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Return a failure exit code when warnings are found.",
     )
 
     convert_fields = subparsers.add_parser(
@@ -197,31 +166,9 @@ def cmd_create_acroform(args: argparse.Namespace) -> int:
 
     colors.step(f"Loading static PDF input: {args.input}")
     colors.step(f"Loading field specification: {args.fields}")
-    precheck = validate_acroform(args.fields, input_pdf=args.input)
-    _print_validation_result(precheck, strict=args.strict_validation, title="Pre-create validation")
-    if precheck.has_failures(strict=args.strict_validation):
-        raise ValueError("Validation failed. Fix the field specification before creating the PDF.")
-
     output, count = create_acroform_pdf(args.input, args.fields, args.output)
     colors.success(f"Saved AcroForm PDF copy with {count} field(s): {output}")
-
-    postcheck = validate_acroform(args.fields, input_pdf=args.input, output_pdf=output)
-    _print_validation_result(postcheck, strict=args.strict_validation, title="Post-create PDF validation")
-    if postcheck.has_failures(strict=args.strict_validation):
-        raise ValueError("Generated PDF failed validation.")
     return 0
-
-
-def cmd_validate_acroform(args: argparse.Namespace) -> int:
-    colors.step(f"Validating field specification: {args.fields}")
-    if args.input:
-        colors.info(f"Using source PDF for page-bound checks: {args.input}")
-    if args.pdf:
-        colors.info(f"Using generated PDF for AcroForm checks: {args.pdf}")
-
-    result = validate_acroform(args.fields, input_pdf=args.input, output_pdf=args.pdf)
-    _print_validation_result(result, strict=args.strict, title="Validation")
-    return 1 if result.has_failures(strict=args.strict) else 0
 
 
 def cmd_convert_fields(args: argparse.Namespace) -> int:
@@ -282,8 +229,6 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_replace_page(args)
         if args.command == "create-acroform":
             return cmd_create_acroform(args)
-        if args.command == "validate-acroform":
-            return cmd_validate_acroform(args)
         if args.command == "convert-fields":
             return cmd_convert_fields(args)
         parser.error(f"Unsupported command: {args.command}")
@@ -291,39 +236,6 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         colors.error(str(exc))
         return 1
-
-
-def _print_validation_result(result: ValidationResult, *, strict: bool, title: str) -> None:
-    colors.step(title)
-    colors.info(
-        f"Validated {len(result.fields)} field spec row(s). "
-        f"Errors={len(result.errors)}, warnings={len(result.warnings)}."
-    )
-
-    if not result.issues:
-        colors.success("No validation issues found.")
-        return
-
-    for issue in result.issues:
-        _print_validation_issue(issue)
-
-    if result.has_failures(strict=strict):
-        colors.error("Validation result is failing.")
-    else:
-        colors.warn("Validation completed with warnings only.")
-
-
-def _print_validation_issue(issue: ValidationIssue) -> None:
-    parts = [issue.code]
-    if issue.page is not None:
-        parts.append(f"page={issue.page}")
-    if issue.field:
-        parts.append(f"field={issue.field}")
-    message = f"{' | '.join(parts)}: {issue.message}"
-    if issue.severity == "ERROR":
-        colors.error(message)
-    else:
-        colors.warn(message)
 
 
 if __name__ == "__main__":
