@@ -75,9 +75,10 @@ page,name,type,x,y,w,h,value
 1,txtInvestorName,text,120,650,240,18,
 1,chkQualifiedInvestor,checkbox,92,610,12,12,0
 1,txtNotes,textarea,120,520,320,60,
+1,imgInvestorSignature,signature,120,470,180,28,
 ```
 
-Coordinates are PDF points from the bottom-left of the page.
+Supported field types are `text`, `textarea`, `checkbox`, and `signature`. Coordinates are PDF points from the bottom-left of the page.
 
 Convert field names in a PDF using the default Plan-T code file:
 

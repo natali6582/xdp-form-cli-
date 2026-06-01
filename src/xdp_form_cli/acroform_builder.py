@@ -140,7 +140,13 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
         widget[Name("/AS")] = widget[Name("/V")]
         return pdf.make_indirect(widget)
 
-    raise ValueError(f"Unsupported field type for {spec.name}: {spec.field_type}. Use text, textarea, or checkbox.")
+    if spec.field_type in {"signature", "sig", "image", "img"}:
+        widget[Name("/FT")] = Name("/Sig")
+        return pdf.make_indirect(widget)
+
+    raise ValueError(
+        f"Unsupported field type for {spec.name}: {spec.field_type}. Use text, textarea, checkbox, or signature."
+    )
 
 
 def _parse_int(row: dict[str, str], column: str, row_number: int) -> int:
