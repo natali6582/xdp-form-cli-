@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,11 +17,6 @@ BENEFICIARY_TABLE_COLUMNS = (
     "CitizenshipCountry",
     "TaxResidencyCountry",
     "BenefitPercent",
-)
-BENEFICIARY_TABLE_RE = re.compile(
-    r"^txtBeneficiary(?P<row>\d+)(?P<column>"
-    + "|".join(BENEFICIARY_TABLE_COLUMNS)
-    + r")$"
 )
 
 
@@ -201,35 +195,20 @@ def _validate_repeated_table_rows(specs: list[AcroFieldSpec]) -> None:
         names_by_page.setdefault(spec.page, set()).add(spec.name)
 
     for page, names in names_by_page.items():
-        table_rows: dict[int, set[str]] = {}
-        for name in names:
-            match = BENEFICIARY_TABLE_RE.match(name)
-            if match is None:
-                continue
-            table_rows.setdefault(int(match.group("row")), set()).add(match.group("column"))
-
-        if not table_rows:
+        first_row = {f"txtBeneficiary1{column}" for column in BENEFICIARY_TABLE_COLUMNS}
+        if not first_row.issubset(names):
             continue
 
-        complete_rows = sorted(
-            row for row, columns in table_rows.items() if set(BENEFICIARY_TABLE_COLUMNS).issubset(columns)
-        )
-        expected_rows = list(range(min(table_rows), min(table_rows) + 3))
-        missing: list[str] = []
-        for row in expected_rows:
-            for column in BENEFICIARY_TABLE_COLUMNS:
-                if column not in table_rows.get(row, set()):
-                    missing.append(f"txtBeneficiary{row}{column}")
-
+        missing = [
+            f"txtBeneficiary{row}{column}"
+            for row in (2, 3)
+            for column in BENEFICIARY_TABLE_COLUMNS
+            if f"txtBeneficiary{row}{column}" not in names
+        ]
         if missing:
             raise ValueError(
                 f"Page {page} has a beneficiary table, but missing repeated row field(s): "
                 + ", ".join(missing)
-            )
-        if len(complete_rows) < 3:
-            raise ValueError(
-                f"Page {page} has a beneficiary table, but only {len(complete_rows)} complete row(s). "
-                "Add fields for all visible table rows."
             )
 
 
