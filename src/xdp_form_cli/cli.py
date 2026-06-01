@@ -6,6 +6,7 @@ from pathlib import Path
 
 from xdp_form_cli import __version__
 from xdp_form_cli.acroform_builder import create_acroform_pdf
+from xdp_form_cli.auto_form import build_auto_form
 from xdp_form_cli.approved_visual_fields import APPROVED_VISUAL_FIELDS
 from xdp_form_cli import colors
 from xdp_form_cli.field_conversion import convert_editor_fields
@@ -70,6 +71,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-validation",
         action="store_true",
         help="With --fields, fail on validation warnings, not only errors.",
+    )
+
+    auto_form_parser = subparsers.add_parser(
+        "auto-form",
+        help="From a URL or PDF with no working fields, auto-detect boxes and build a fillable AcroForm (signatures as image).",
+    )
+    auto_form_parser.add_argument(
+        "--url",
+        default=None,
+        help="http(s) URL of the source PDF (XFA shell or flat layout).",
+    )
+    auto_form_parser.add_argument(
+        "--input",
+        default=None,
+        help="Local source PDF path. Provide either --url or --input.",
+    )
+    auto_form_parser.add_argument(
+        "--output",
+        required=True,
+        help="Path to the new fillable PDF file. Must not be the source file.",
+    )
+    auto_form_parser.add_argument(
+        "--fields-csv",
+        default=None,
+        help="Optional path for the emitted editable field CSV (defaults next to --output).",
     )
 
     create_acroform = subparsers.add_parser(
@@ -267,6 +293,24 @@ def cmd_strip_xfa(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auto_form(args: argparse.Namespace) -> int:
+    if bool(args.url) == bool(args.input):
+        raise ValueError("Provide exactly one of --url or --input.")
+    if not _is_pdf(args.output):
+        raise ValueError("auto-form output must be a PDF file.")
+    source = args.url or args.input
+    if args.input and not _is_pdf(args.input):
+        raise ValueError("auto-form --input must be a PDF file.")
+
+    colors.step(f"Loading source: {source}")
+    output, csv_path, count = build_auto_form(source, args.output, csv_path=args.fields_csv)
+    colors.success(f"Detected and placed {count} field(s).")
+    colors.success(f"Saved editable field CSV: {csv_path}")
+    colors.success(f"Saved fillable AcroForm PDF: {output}")
+    colors.info("Adjust any box in the CSV and rerun create-acroform if a field landed off.")
+    return 0
+
+
 def cmd_create_acroform(args: argparse.Namespace) -> int:
     if args.input == args.output:
         raise ValueError("--output must be a new file path, not the source file.")
@@ -360,6 +404,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_replace_page(args)
         if args.command == "strip-xfa":
             return cmd_strip_xfa(args)
+        if args.command == "auto-form":
+            return cmd_auto_form(args)
         if args.command == "create-acroform":
             return cmd_create_acroform(args)
         if args.command == "validate-acroform":
