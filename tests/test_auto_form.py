@@ -74,3 +74,58 @@ def test_write_field_csv_has_header(tmp_path: Path) -> None:
 
     header = csv_path.read_text(encoding="utf-8").splitlines()[0]
     assert header == "page,name,type,x,y,w,h,value"
+
+
+def _write_inside_label_pdf(path: Path) -> Path:
+    """A single box with its label printed inside the top of the cell."""
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    # Box: x=100 y=300 w=150 h=40 -> top edge at y=340.
+    # Label baseline at y=328 sits inside the top region of the box.
+    content = (
+        b"BT /F1 10 Tf 105 328 Td (City) Tj ET\n"
+        b"100 300 150 40 re S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def _write_above_label_pdf(path: Path) -> Path:
+    """A single box with its label printed above the cell (outside the box)."""
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    # Box: x=100 y=300 w=150 h=40 -> top edge at y=340.
+    # Label baseline at y=350 sits above the box, outside its vertical span.
+    content = (
+        b"BT /F1 10 Tf 105 350 Td (City) Tj ET\n"
+        b"100 300 150 40 re S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_inside_top_label_lowers_field_top_below_baseline(tmp_path: Path) -> None:
+    source = _write_inside_label_pdf(tmp_path / "inside.pdf")
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    spec = specs[0]
+    label_baseline = 328.0
+    # The field top edge must not overlap the label baseline.
+    assert spec.y + spec.h <= label_baseline + 0.01
+    # The bottom of the box is preserved.
+    assert round(spec.y) == 300
+
+
+def test_label_above_box_keeps_full_height(tmp_path: Path) -> None:
+    source = _write_above_label_pdf(tmp_path / "above.pdf")
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert round(spec.h) == 40
+    assert round(spec.y + spec.h) == 340
