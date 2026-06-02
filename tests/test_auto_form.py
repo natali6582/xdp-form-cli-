@@ -6,6 +6,7 @@ import pikepdf
 from pikepdf import Dictionary, Name
 
 from xdp_form_cli.auto_form import (
+    MAX_FIELD_HEIGHT_PT,
     build_auto_form,
     detect_field_specs,
     write_field_csv,
@@ -65,6 +66,39 @@ def test_build_auto_form_strips_xfa_and_places_fields(tmp_path: Path) -> None:
             if isinstance(a, Dictionary) and str(a.get(Name("/Subtype"))) == "/Widget"
         ]
         assert len(widgets) == 2
+
+
+def _write_tall_box_pdf(path: Path, box_h: float) -> Path:
+    """A page with one box of the given height; label is outside the box."""
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    label_y = 100 + box_h + 5  # label sits above the box
+    content = (
+        f"BT /F1 10 Tf 50 {label_y} Td (Label) Tj ET\n"
+        f"100 100 150 {box_h} re S\n"
+    ).encode()
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_tall_box_height_is_capped(tmp_path: Path) -> None:
+    source = _write_tall_box_pdf(tmp_path / "tall.pdf", box_h=80.0)
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.h == MAX_FIELD_HEIGHT_PT
+    assert spec.y == 100.0  # anchored to box bottom
+
+
+def test_short_box_height_is_unchanged(tmp_path: Path) -> None:
+    source = _write_tall_box_pdf(tmp_path / "short.pdf", box_h=12.0)
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].h == 12.0
 
 
 def test_write_field_csv_has_header(tmp_path: Path) -> None:
