@@ -278,7 +278,8 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
     standalone_underlines: list[tuple[float, float, float, float]] = []
     for ux, uy, uw in set(underline_candidates):
         covered = any(
-            abs(ux - cx) <= 5 and abs(uw - cw) <= 5 and cy - MAX_FIELD_HEIGHT_PT <= uy <= cy + ch
+            abs(ux - cx) <= 5 and abs(uw - cw) <= 5
+            and cy - MAX_FIELD_HEIGHT_PT <= uy <= cy + ch + MAX_FIELD_HEIGHT_PT
             for cx, cy, cw, ch in clip_rects
         )
         if not covered:
