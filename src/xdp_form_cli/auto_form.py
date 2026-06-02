@@ -183,6 +183,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
     rects: list[tuple[float, float, float, float]] = []
     pending: list[tuple[float, float, float, float]] = []
     clip_pending: list[tuple[float, float, float, float]] = []
+    last_clip_rects: list[tuple[float, float, float, float]] = []
     fill_is_white = False  # PDF default fill colour is black
 
     for token in pikepdf.parse_content_stream(page):
@@ -208,6 +209,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
                 pass
 
         elif op == "re":
+            last_clip_rects.clear()
             try:
                 x, y, w, h = (float(v) for v in token.operands)
             except (TypeError, ValueError):
@@ -219,23 +221,34 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             if w >= MIN_BOX_WIDTH_PT and MIN_BOX_HEIGHT_PT <= h <= MAX_BOX_HEIGHT_PT:
                 pending.append((round(x, 1), round(y, 1), round(w, 1), round(h, 1)))
 
+        elif op == "Do":
+            # Image XObject rendered inside a clip path — discard the clip rects
+            # that were just accepted, since this is a logo/image area, not a field.
+            for r in last_clip_rects:
+                if r in rects:
+                    rects.remove(r)
+            last_clip_rects.clear()
+
         elif op in ("S", "s"):
             # Stroke only — always an input border, no fill involved.
             rects.extend(pending)
             pending.clear()
             clip_pending.clear()
+            last_clip_rects.clear()
         elif op in ("f", "F", "f*"):
             # Fill only — keep if white (blank field background), skip if coloured header.
             if fill_is_white:
                 rects.extend(pending)
             pending.clear()
             clip_pending.clear()
+            last_clip_rects.clear()
         elif op in ("B", "B*", "b", "b*"):
             # Fill + stroke — keep only if fill is white.
             if fill_is_white:
                 rects.extend(pending)
             pending.clear()
             clip_pending.clear()
+            last_clip_rects.clear()
         elif op in ("W", "W*"):
             # Clip path — XFA-stripped PDFs use re W n to mark each field area.
             clip_pending = list(pending)
@@ -244,6 +257,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             # End path without fill/stroke. If preceded by W/W* this is a clip-only
             # area (re W n), which XFA uses for every rendered field — treat as input.
             rects.extend(clip_pending)
+            last_clip_rects = list(clip_pending)
             clip_pending.clear()
             pending.clear()
 
