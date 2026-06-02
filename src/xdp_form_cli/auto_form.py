@@ -185,6 +185,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
     clip_pending: list[tuple[float, float, float, float]] = []
     last_clip_rects: list[tuple[float, float, float, float]] = []
     fill_is_white = False  # PDF default fill colour is black
+    path_points: list[tuple[float, float]] = []  # for m/l underline detection
 
     for token in pikepdf.parse_content_stream(page):
         op = str(token.operator)
@@ -205,6 +206,17 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             try:
                 c, m, y, k = (float(token.operands[i]) for i in range(4))
                 fill_is_white = c < 0.1 and m < 0.1 and y < 0.1 and k < 0.1
+            except (TypeError, ValueError, IndexError):
+                pass
+
+        elif op == "m":
+            try:
+                path_points = [(float(token.operands[0]), float(token.operands[1]))]
+            except (TypeError, ValueError, IndexError):
+                path_points = []
+        elif op == "l":
+            try:
+                path_points.append((float(token.operands[0]), float(token.operands[1])))
             except (TypeError, ValueError, IndexError):
                 pass
 
@@ -235,6 +247,16 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             pending.clear()
             clip_pending.clear()
             last_clip_rects.clear()
+            # Also collect horizontal underlines drawn with m/l/S.
+            for i in range(len(path_points) - 1):
+                x1, y1 = path_points[i]
+                x2, y2 = path_points[i + 1]
+                if abs(y2 - y1) < 2.0:  # horizontal (allow small tolerance)
+                    w = abs(x2 - x1)
+                    if w >= MIN_BOX_WIDTH_PT:
+                        x = min(x1, x2)
+                        rects.append((round(x, 1), round(y1, 1), round(w, 1), MAX_FIELD_HEIGHT_PT))
+            path_points = []
         elif op in ("f", "F", "f*"):
             # Fill only — keep if white (blank field background), skip if coloured header.
             if fill_is_white:
@@ -242,6 +264,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             pending.clear()
             clip_pending.clear()
             last_clip_rects.clear()
+            path_points = []
         elif op in ("B", "B*", "b", "b*"):
             # Fill + stroke — keep only if fill is white.
             if fill_is_white:
@@ -249,6 +272,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             pending.clear()
             clip_pending.clear()
             last_clip_rects.clear()
+            path_points = []
         elif op in ("W", "W*"):
             # Clip path — XFA-stripped PDFs use re W n to mark each field area.
             clip_pending = list(pending)
