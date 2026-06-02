@@ -9,78 +9,76 @@ with tempfile.TemporaryDirectory() as tmp:
     with pikepdf.Pdf.open(str(stripped)) as pdf:
         page = pdf.pages[0]
 
-        # Find the cm operator and current CTM
-        print("=== cm operators ===")
-        for token in pikepdf.parse_content_stream(page):
-            op = str(token.operator)
-            if op == "cm":
-                print(f"cm: {[str(v) for v in token.operands]}")
+        # Read all fonts on the page
+        fonts = {}
+        res = page.resources
+        if "/Font" in res:
+            for fname, fobj in res["/Font"].items():
+                first_char = int(fobj.get("/FirstChar", 0))
+                widths = fobj.get("/Widths", [])
+                underscore_code = 95
+                idx = underscore_code - first_char
+                if 0 <= idx < len(widths):
+                    w = float(widths[idx])  # in 1/1000 em
+                else:
+                    w = None
+                subtype = str(fobj.get("/Subtype", "?"))
+                base = str(fobj.get("/BaseFont", "?"))
+                fonts[fname] = {"advance_1000": w, "subtype": subtype, "base": base}
+                print(f"Font {fname}: {base} ({subtype}), '_' advance = {w}")
 
         print()
-        print("=== Page MediaBox ===")
-        print(page.mediabox)
-
-        # Track CTM to convert text coords to page coords
-        # CTM starts as identity; cm multiplies it
-        # page coords = CTM * text_coords
-        # For cm [a b c d e f]: new_x = a*x + c*y + e, new_y = b*x + d*y + f
-        ctm = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]  # [a,b,c,d,e,f] identity
-
-        def apply_ctm(ctm, x, y):
-            a, b, c, d, e, f = ctm
-            return a*x + c*y + e, b*x + d*y + f
-
-        def mul_matrix(m1, m2):
-            # m1 and m2 are [a,b,c,d,e,f] = [[a,b],[c,d]] + translation [e,f]
-            a1,b1,c1,d1,e1,f1 = m1
-            a2,b2,c2,d2,e2,f2 = m2
-            return [
-                a1*a2 + c1*b2, b1*a2 + d1*b2,
-                a1*c2 + c1*d2, b1*c2 + d1*d2,
-                a1*e2 + c1*f2 + e1, b1*e2 + d1*f2 + f1
-            ]
-
-        print()
-        print("=== Text runs with underscores (page coords) ===")
-        tx = ty = 0.0
-        tm_a = 1.0
-        ctm_stack = [ctm[:]]
-        current_ctm = ctm[:]
+        # Now show underline widths with exact advance
+        tm_a = 1.0; tf_size = 10.0; tf_name = None
+        page_tx = page_ty = 0.0; tm_e = tm_f = 0.0; tm_d = 1.0
 
         for token in pikepdf.parse_content_stream(page):
             op = str(token.operator)
-            if op == "q":
-                ctm_stack.append(current_ctm[:])
-            elif op == "Q":
-                if ctm_stack:
-                    current_ctm = ctm_stack.pop()
-            elif op == "cm":
-                vals = [float(v) for v in token.operands]
-                current_ctm = mul_matrix(current_ctm, vals)
-            elif op == "BT":
-                tx = ty = 0.0; tm_a = 1.0
+            if op == "BT":
+                tm_a = tm_d = 1.0; tm_e = tm_f = page_tx = page_ty = 0.0; tf_size = 10.0
+            elif op == "Tf":
+                try:
+                    tf_name = str(token.operands[0])
+                    tf_size = float(token.operands[1])
+                except: pass
             elif op == "Tm" and len(token.operands) == 6:
-                tm_a = float(token.operands[0])
-                tx = float(token.operands[4])
-                ty = float(token.operands[5])
-            elif op == "Td" and len(token.operands) == 2:
-                tx += float(token.operands[0])
-                ty += float(token.operands[1])
-            elif op == "TJ" and 80 < ty < 220:
-                items = token.operands[0]
-                total_kern = 0.0
-                txt = ""
-                for p in items:
-                    if isinstance(p, (int, float, decimal.Decimal)):
-                        total_kern += float(p)
-                    else:
-                        try:
-                            txt += bytes(p).decode("latin-1", "ignore")
-                        except Exception:
-                            pass
-                if "_" in txt or txt.strip():
-                    px, py = apply_ctm(current_ctm, tx, ty)
-                    # Also apply text matrix scale to understand field width
-                    n_under = txt.count("_")
-                    print(f"  TJ local=({tx:.1f},{ty:.1f}) page=({px:.1f},{py:.1f}) "
-                          f"a={tm_a:.2f} kern={total_kern:.0f} n_={n_under}: {repr(txt[:50])}")
+                tm_a = float(token.operands[0]); tm_d = float(token.operands[3])
+                tm_e = float(token.operands[4]); tm_f = float(token.operands[5])
+                page_tx = tm_e; page_ty = tm_f
+            elif op in ("Td", "TD") and len(token.operands) == 2:
+                page_tx += float(token.operands[0]) * tm_a
+                page_ty += float(token.operands[1]) * tm_d
+            elif op in ("TJ", "Tj") and 100 < page_ty < 220:
+                if op == "Tj":
+                    try: txt = bytes(token.operands[0]).decode("latin-1", "ignore")
+                    except: continue
+                else:
+                    txt = ""
+                    for p in token.operands[0]:
+                        if isinstance(p, (int, float, decimal.Decimal)): continue
+                        try: txt += bytes(p).decode("latin-1", "ignore")
+                        except: pass
+
+                if "_" not in txt:
+                    continue
+
+                under_idx = txt.index("_")
+                n_under = len(txt[under_idx:].rstrip()) - len(txt[under_idx:].rstrip().lstrip("_"))
+                if n_under < 5:
+                    continue
+
+                # exact width from font
+                adv_1000 = fonts.get(tf_name, {}).get("advance_1000") if tf_name else None
+                if adv_1000 is not None:
+                    char_w = adv_1000 / 1000.0 * tf_size * abs(tm_a)
+                    method = "font_metrics"
+                else:
+                    char_w = abs(tm_a) * tf_size * 0.55
+                    method = "estimate"
+
+                prefix_w = under_idx * char_w
+                field_x = page_tx + prefix_w
+                field_w = n_under * char_w
+                print(f"n={n_under} underscores, char_w={char_w:.3f}pt [{method}]")
+                print(f"  field_x={field_x:.1f}  field_w={field_w:.1f}  (ends at {field_x+field_w:.1f})")
+                print(f"  text: {repr(txt[:50])}")
