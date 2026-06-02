@@ -182,6 +182,7 @@ def _download_pdf(url: str, dest: Path) -> Path:
 def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
     rects: list[tuple[float, float, float, float]] = []
     pending: list[tuple[float, float, float, float]] = []
+    clip_pending: list[tuple[float, float, float, float]] = []
     fill_is_white = False  # PDF default fill colour is black
 
     for token in pikepdf.parse_content_stream(page):
@@ -222,17 +223,28 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             # Stroke only — always an input border, no fill involved.
             rects.extend(pending)
             pending.clear()
+            clip_pending.clear()
         elif op in ("f", "F", "f*"):
             # Fill only — keep if white (blank field background), skip if coloured header.
             if fill_is_white:
                 rects.extend(pending)
             pending.clear()
+            clip_pending.clear()
         elif op in ("B", "B*", "b", "b*"):
             # Fill + stroke — keep only if fill is white.
             if fill_is_white:
                 rects.extend(pending)
             pending.clear()
-        elif op in ("n", "W", "W*"):
+            clip_pending.clear()
+        elif op in ("W", "W*"):
+            # Clip path — XFA-stripped PDFs use re W n to mark each field area.
+            clip_pending = list(pending)
+            pending.clear()
+        elif op == "n":
+            # End path without fill/stroke. If preceded by W/W* this is a clip-only
+            # area (re W n), which XFA uses for every rendered field — treat as input.
+            rects.extend(clip_pending)
+            clip_pending.clear()
             pending.clear()
 
     unique = sorted(set(rects), key=lambda r: (-r[1], r[0]))
