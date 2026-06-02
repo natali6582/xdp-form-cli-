@@ -119,7 +119,7 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
     with pikepdf.Pdf.open(str(pdf_path)) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
             anchors = _extract_text_anchors(page)
-            boxes = _detect_boxes(page, page_index)
+            boxes = [b for b in _detect_boxes(page, page_index) if not _box_contains_text(b, anchors)]
             for box in boxes:
                 label = _nearest_label(box, anchors)
                 is_signature = _is_signature_label(label)
@@ -290,6 +290,13 @@ def _operand_text(operand) -> str:
         return bytes(operand).decode("latin-1", errors="ignore")
     except (TypeError, ValueError):
         return str(operand)
+
+
+def _box_contains_text(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
+    for anchor in anchors:
+        if box.x <= anchor.x <= box.x + box.w and box.y <= anchor.y <= box.y + box.h:
+            return True
+    return False
 
 
 def _nearest_label(box: DetectedBox, anchors: list[TextAnchor]) -> str:
