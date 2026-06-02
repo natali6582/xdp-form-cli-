@@ -42,6 +42,11 @@ MIN_BOX_WIDTH_PT = 40.0
 MIN_BOX_HEIGHT_PT = 9.0
 MAX_BOX_HEIGHT_PT = 120.0
 
+# Field height cap: keeps the widget in the blank lower portion of a tall cell,
+# below any printed label. Must match the /Arial 10 Tf default in acroform_builder.
+FIELD_FONT_SIZE_PT = 10.0
+MAX_FIELD_HEIGHT_PT = 2 * FIELD_FONT_SIZE_PT
+
 # Cap on a downloaded PDF to avoid pulling an unbounded response into memory.
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
@@ -120,15 +125,17 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
                 is_signature = _is_signature_label(label)
                 base = _field_base_name(label, is_signature)
                 name = _unique_name(base, used_names)
+                field_type = "image" if is_signature else "text"
+                h = min(box.h, MAX_FIELD_HEIGHT_PT)
                 specs.append(
                     AutoFieldSpec(
                         page=box.page,
                         name=name,
-                        field_type="image" if is_signature else "text",
+                        field_type=field_type,
                         x=round(box.x, 2),
                         y=round(box.y, 2),
                         w=round(box.w, 2),
-                        h=round(box.h, 2),
+                        h=round(h, 2),
                     )
                 )
     return specs
@@ -174,19 +181,59 @@ def _download_pdf(url: str, dest: Path) -> Path:
 
 def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
     rects: list[tuple[float, float, float, float]] = []
+    pending: list[tuple[float, float, float, float]] = []
+    fill_is_white = False  # PDF default fill colour is black
+
     for token in pikepdf.parse_content_stream(page):
-        if str(token.operator) != "re":
-            continue
-        try:
-            x, y, w, h = (float(v) for v in token.operands)
-        except (TypeError, ValueError):
-            continue
-        if w < 0:
-            x, w = x + w, -w
-        if h < 0:
-            y, h = y + h, -h
-        if w >= MIN_BOX_WIDTH_PT and MIN_BOX_HEIGHT_PT <= h <= MAX_BOX_HEIGHT_PT:
-            rects.append((round(x, 1), round(y, 1), round(w, 1), round(h, 1)))
+        op = str(token.operator)
+
+        # Track fill colour so we can skip shaded header rows.
+        if op == "g":  # grayscale fill: 1.0 = white
+            try:
+                fill_is_white = float(token.operands[0]) > 0.9
+            except (TypeError, ValueError, IndexError):
+                pass
+        elif op == "rg":  # RGB fill
+            try:
+                r, g, b = (float(token.operands[i]) for i in range(3))
+                fill_is_white = r > 0.9 and g > 0.9 and b > 0.9
+            except (TypeError, ValueError, IndexError):
+                pass
+        elif op == "k":  # CMYK fill: 0 0 0 0 = white
+            try:
+                c, m, y, k = (float(token.operands[i]) for i in range(4))
+                fill_is_white = c < 0.1 and m < 0.1 and y < 0.1 and k < 0.1
+            except (TypeError, ValueError, IndexError):
+                pass
+
+        elif op == "re":
+            try:
+                x, y, w, h = (float(v) for v in token.operands)
+            except (TypeError, ValueError):
+                continue
+            if w < 0:
+                x, w = x + w, -w
+            if h < 0:
+                y, h = y + h, -h
+            if w >= MIN_BOX_WIDTH_PT and MIN_BOX_HEIGHT_PT <= h <= MAX_BOX_HEIGHT_PT:
+                pending.append((round(x, 1), round(y, 1), round(w, 1), round(h, 1)))
+
+        elif op in ("S", "s"):
+            # Stroke only — always an input border, no fill involved.
+            rects.extend(pending)
+            pending.clear()
+        elif op in ("f", "F", "f*"):
+            # Fill only — keep if white (blank field background), skip if coloured header.
+            if fill_is_white:
+                rects.extend(pending)
+            pending.clear()
+        elif op in ("B", "B*", "b", "b*"):
+            # Fill + stroke — keep only if fill is white.
+            if fill_is_white:
+                rects.extend(pending)
+            pending.clear()
+        elif op in ("n", "W", "W*"):
+            pending.clear()
 
     unique = sorted(set(rects), key=lambda r: (-r[1], r[0]))
     return [DetectedBox(page_index, x, y, w, h) for (x, y, w, h) in unique]
