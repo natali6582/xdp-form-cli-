@@ -20,6 +20,7 @@ with ``create-acroform`` / ``strip-xfa --fields``.
 from __future__ import annotations
 
 import csv
+import decimal
 import re
 import tempfile
 from dataclasses import dataclass
@@ -119,7 +120,12 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
     with pikepdf.Pdf.open(str(pdf_path)) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
             anchors = _extract_text_anchors(page)
-            boxes = _detect_boxes(page, page_index)
+            geo_boxes = _detect_boxes(page, page_index)
+            underline_boxes = [
+                b for b in _detect_underline_boxes(page, page_index)
+                if not _overlaps_any(b, geo_boxes)
+            ]
+            boxes = geo_boxes + underline_boxes
             for box in boxes:
                 label = _nearest_label(box, anchors)
                 is_signature = _is_signature_label(label)
@@ -177,6 +183,100 @@ def _download_pdf(url: str, dest: Path) -> Path:
         raise ValueError("Downloaded content is not a PDF (missing %PDF header).")
     dest.write_bytes(data)
     return dest
+
+
+def _detect_underline_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
+    """Detect fields rendered as underscore-character runs in TJ/Tj operators.
+
+    XFA forms sometimes render input areas as a sequence of '_' characters
+    (e.g. 'Signature: _______') rather than as drawn rectangles.  We locate
+    every underscore run, compute its page-space x/width correctly (accounting
+    for the Tm scale factor in Td offsets), and emit a DetectedBox for it.
+    """
+    boxes: list[DetectedBox] = []
+    tm_a = tm_d = 1.0
+    tm_e = tm_f = 0.0
+    page_tx = page_ty = 0.0
+    tf_size = 10.0
+
+    for token in pikepdf.parse_content_stream(page):
+        op = str(token.operator)
+
+        if op == "BT":
+            tm_a = tm_d = 1.0
+            tm_e = tm_f = page_tx = page_ty = 0.0
+            tf_size = 10.0
+        elif op == "Tf":
+            try:
+                tf_size = float(token.operands[1])
+            except (TypeError, ValueError, IndexError):
+                pass
+        elif op == "Tm" and len(token.operands) == 6:
+            tm_a = float(token.operands[0])
+            tm_d = float(token.operands[3])
+            tm_e = float(token.operands[4])
+            tm_f = float(token.operands[5])
+            page_tx = tm_e
+            page_ty = tm_f
+        elif op in ("Td", "TD") and len(token.operands) == 2:
+            # Td/TD arguments are in text space; multiply by Tm scale to get page coords.
+            page_tx += float(token.operands[0]) * tm_a
+            page_ty += float(token.operands[1]) * tm_d
+        elif op in ("TJ", "Tj"):
+            txt = _decode_text_op(token)
+            if "_" not in txt:
+                continue
+            # Effective character advance estimate (55% of em, works for most Latin fonts).
+            char_w = abs(tm_a) * tf_size * 0.55
+            if char_w <= 0:
+                continue
+            # Find where underscores start (there may be a label prefix like "Signature: ").
+            under_idx = txt.index("_")
+            prefix_len = under_idx
+            run_end = under_idx
+            while run_end < len(txt) and txt[run_end] == "_":
+                run_end += 1
+            n_under = run_end - under_idx
+            if n_under < 5:
+                continue
+            field_x = page_tx + prefix_len * char_w
+            field_w = n_under * char_w
+            if field_w < MIN_BOX_WIDTH_PT:
+                continue
+            boxes.append(DetectedBox(page_index, round(field_x, 1), round(page_ty, 1),
+                                     round(field_w, 1), MAX_FIELD_HEIGHT_PT))
+
+    return boxes
+
+
+def _decode_text_op(token) -> str:
+    """Return the text content of a Tj or TJ operator as a latin-1 string."""
+    op = str(token.operator)
+    if op == "Tj":
+        try:
+            return bytes(token.operands[0]).decode("latin-1", "ignore")
+        except Exception:
+            return ""
+    # TJ — array of strings and kerning numbers
+    parts: list[str] = []
+    for item in token.operands[0]:
+        if isinstance(item, (int, float, decimal.Decimal)):
+            continue
+        try:
+            parts.append(bytes(item).decode("latin-1", "ignore"))
+        except Exception:
+            pass
+    return "".join(parts)
+
+
+def _overlaps_any(box: DetectedBox, others: list[DetectedBox]) -> bool:
+    """Return True if box overlaps in both x and y with any box in others."""
+    for o in others:
+        x_overlap = box.x < o.x + o.w and box.x + box.w > o.x
+        y_overlap = box.y < o.y + o.h and box.y + box.h > o.y
+        if x_overlap and y_overlap:
+            return True
+    return False
 
 
 def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
