@@ -190,14 +190,30 @@ def _detect_underline_boxes(page: pikepdf.Page, page_index: int) -> list[Detecte
 
     XFA forms sometimes render input areas as a sequence of '_' characters
     (e.g. 'Signature: _______') rather than as drawn rectangles.  We locate
-    every underscore run, compute its page-space x/width correctly (accounting
-    for the Tm scale factor in Td offsets), and emit a DetectedBox for it.
+    every underscore run, compute its page-space x/width using the exact glyph
+    advance from the embedded font (Widths array), falling back to 0.556em.
+    Td/TD offsets are scaled by the Tm scale factor for correct page coordinates.
     """
+    # Pre-build a {font_resource_name: underscore_advance_in_em} lookup.
+    underscore_advance_em: dict[str, float] = {}
+    res = page.resources
+    if "/Font" in res:
+        for fname, fobj in res["/Font"].items():
+            try:
+                first_char = int(fobj.get("/FirstChar", 0))
+                widths = fobj.get("/Widths", [])
+                idx = 95 - first_char  # ASCII '_'
+                if 0 <= idx < len(widths):
+                    underscore_advance_em[str(fname)] = float(widths[idx]) / 1000.0
+            except Exception:
+                pass
+
     boxes: list[DetectedBox] = []
     tm_a = tm_d = 1.0
     tm_e = tm_f = 0.0
     page_tx = page_ty = 0.0
     tf_size = 10.0
+    tf_name: str | None = None
 
     for token in pikepdf.parse_content_stream(page):
         op = str(token.operator)
@@ -208,6 +224,7 @@ def _detect_underline_boxes(page: pikepdf.Page, page_index: int) -> list[Detecte
             tf_size = 10.0
         elif op == "Tf":
             try:
+                tf_name = str(token.operands[0])
                 tf_size = float(token.operands[1])
             except (TypeError, ValueError, IndexError):
                 pass
@@ -219,27 +236,27 @@ def _detect_underline_boxes(page: pikepdf.Page, page_index: int) -> list[Detecte
             page_tx = tm_e
             page_ty = tm_f
         elif op in ("Td", "TD") and len(token.operands) == 2:
-            # Td/TD arguments are in text space; multiply by Tm scale to get page coords.
+            # Td/TD arguments are in text space; multiply by Tm scale for page coords.
             page_tx += float(token.operands[0]) * tm_a
             page_ty += float(token.operands[1]) * tm_d
         elif op in ("TJ", "Tj"):
             txt = _decode_text_op(token)
             if "_" not in txt:
                 continue
-            # Effective character advance estimate (55% of em, works for most Latin fonts).
-            char_w = abs(tm_a) * tf_size * 0.55
+            # Exact glyph advance from font Widths, fallback to 0.556 em (Arial standard).
+            adv_em = underscore_advance_em.get(tf_name or "", 0.556)
+            char_w = adv_em * tf_size * abs(tm_a)
             if char_w <= 0:
                 continue
-            # Find where underscores start (there may be a label prefix like "Signature: ").
+            # Find the longest consecutive run of underscores.
             under_idx = txt.index("_")
-            prefix_len = under_idx
             run_end = under_idx
             while run_end < len(txt) and txt[run_end] == "_":
                 run_end += 1
             n_under = run_end - under_idx
-            if n_under < 5:
+            if n_under < 10:  # skip short decorative underscores
                 continue
-            field_x = page_tx + prefix_len * char_w
+            field_x = page_tx + under_idx * char_w
             field_w = n_under * char_w
             if field_w < MIN_BOX_WIDTH_PT:
                 continue
