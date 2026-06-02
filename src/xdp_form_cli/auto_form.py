@@ -42,6 +42,11 @@ MIN_BOX_WIDTH_PT = 40.0
 MIN_BOX_HEIGHT_PT = 9.0
 MAX_BOX_HEIGHT_PT = 120.0
 
+# Field height cap: keeps the widget in the blank lower portion of a tall cell,
+# below any printed label. Must match the /Arial 10 Tf default in acroform_builder.
+FIELD_FONT_SIZE_PT = 10.0
+MAX_FIELD_HEIGHT_PT = 2 * FIELD_FONT_SIZE_PT
+
 # Cap on a downloaded PDF to avoid pulling an unbounded response into memory.
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
@@ -120,15 +125,17 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
                 is_signature = _is_signature_label(label)
                 base = _field_base_name(label, is_signature)
                 name = _unique_name(base, used_names)
+                field_type = "image" if is_signature else "text"
+                h = min(box.h, MAX_FIELD_HEIGHT_PT)
                 specs.append(
                     AutoFieldSpec(
                         page=box.page,
                         name=name,
-                        field_type="image" if is_signature else "text",
+                        field_type=field_type,
                         x=round(box.x, 2),
                         y=round(box.y, 2),
                         w=round(box.w, 2),
-                        h=round(box.h, 2),
+                        h=round(h, 2),
                     )
                 )
     return specs
