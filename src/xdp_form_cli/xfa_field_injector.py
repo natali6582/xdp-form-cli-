@@ -46,12 +46,15 @@ def inject_xfa_fields(
     try:
         page_heights = _page_heights_pt(editor.pdf)
         topmost = editor.xdp._find_topmost_subform()
-        page_subforms = {
-            child.get("name"): child
-            for child in topmost
-            if etree.QName(child).localname == "subform"
-            and (child.get("name") or "").startswith("Page")
-        }
+        page_subforms: dict[str, etree._Element] = {}
+        for child in topmost:
+            if not isinstance(child.tag, str):
+                continue
+            if etree.QName(child).localname != "subform":
+                continue
+            name = child.get("name") or ""
+            if name.startswith("Page"):
+                page_subforms[name] = child
 
         for spec in specs:
             page_name = f"Page{spec.page}"
@@ -76,7 +79,11 @@ def inject_xfa_fields_from_template(
     output_pdf: str | Path,
     specs: list[AutoFieldSpec],
 ) -> Path:
-    """Inject fields into an external XFA template and embed it in the source PDF."""
+    """Inject fields into an external XFA template and embed it in the source PDF.
+
+    Template may be a raw .xdp/.xml file or another PDF that carries an XFA packet
+    (we extract the template packet from it).
+    """
     source = Path(source_pdf)
     output = Path(output_pdf)
     template_path = Path(xfa_template_path)
@@ -85,28 +92,21 @@ def inject_xfa_fields_from_template(
     if not template_path.is_file():
         raise ValueError(f"XFA template file not found: {template_path}")
 
-    raw_template = template_path.read_bytes()
-    xdp = XdpEditor.from_bytes(raw_template, str(template_path))
-    topmost = xdp._find_topmost_subform()
-    page_subforms = {
-        child.get("name"): child
-        for child in topmost
-        if etree.QName(child).localname == "subform"
-        and (child.get("name") or "").startswith("Page")
-    }
+    if template_path.suffix.lower() == ".pdf":
+        template_editor = PdfXfaEditor(template_path)
+        try:
+            xdp = template_editor.xdp
+            _inject_specs_into_xdp(xdp, source, specs)
+            updated_xfa = xdp.to_bytes()
+        finally:
+            template_editor.close()
+    else:
+        raw_template = template_path.read_bytes()
+        xdp = XdpEditor.from_bytes(raw_template, str(template_path))
+        _inject_specs_into_xdp(xdp, source, specs)
+        updated_xfa = xdp.to_bytes()
 
     with pikepdf.Pdf.open(str(source)) as pdf:
-        page_heights = _page_heights_pt(pdf)
-        for spec in specs:
-            page_name = f"Page{spec.page}"
-            page_subform = page_subforms.get(page_name)
-            if page_subform is None:
-                continue
-            page_h_pt = page_heights.get(spec.page, 841.92)
-            field_element = _build_field_element(spec, page_h_pt)
-            page_subform.append(field_element)
-
-        updated_xfa = xdp.to_bytes()
         root = pdf.Root
         acroform = root.get(Name("/AcroForm"))
         if acroform is None:
@@ -116,6 +116,29 @@ def inject_xfa_fields_from_template(
         pdf.save(str(output))
 
     return output
+
+
+def _inject_specs_into_xdp(xdp: XdpEditor, source_pdf: Path, specs: list[AutoFieldSpec]) -> None:
+    topmost = xdp._find_topmost_subform()
+    page_subforms: dict[str, etree._Element] = {}
+    for child in topmost:
+        if not isinstance(child.tag, str):
+            continue  # skip comments/processing instructions
+        if etree.QName(child).localname != "subform":
+            continue
+        name = child.get("name") or ""
+        if name.startswith("Page"):
+            page_subforms[name] = child
+    with pikepdf.Pdf.open(str(source_pdf)) as pdf:
+        page_heights = _page_heights_pt(pdf)
+    for spec in specs:
+        page_name = f"Page{spec.page}"
+        page_subform = page_subforms.get(page_name)
+        if page_subform is None:
+            continue
+        page_h_pt = page_heights.get(spec.page, 841.92)
+        field_element = _build_field_element(spec, page_h_pt)
+        page_subform.append(field_element)
 
 
 def _page_heights_pt(pdf: pikepdf.Pdf) -> dict[int, float]:
