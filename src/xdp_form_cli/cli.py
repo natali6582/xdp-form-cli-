@@ -97,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional path for the emitted editable field CSV (defaults next to --output).",
     )
+    auto_form_parser.add_argument(
+        "--xfa",
+        default=None,
+        help="Optional XFA/XDP template file. Fields are injected into this template "
+        "and embedded in the output PDF alongside the AcroForm layer.",
+    )
 
     create_acroform = subparsers.add_parser(
         "create-acroform",
@@ -303,10 +309,14 @@ def cmd_auto_form(args: argparse.Namespace) -> int:
         raise ValueError("auto-form --input must be a PDF file.")
 
     colors.step(f"Loading source: {source}")
-    output, csv_path, count = build_auto_form(source, args.output, csv_path=args.fields_csv)
+    output, csv_path, count = build_auto_form(
+        source, args.output, csv_path=args.fields_csv, xfa_template_path=args.xfa
+    )
     colors.success(f"Detected and placed {count} field(s).")
     colors.success(f"Saved editable field CSV: {csv_path}")
     colors.success(f"Saved fillable AcroForm PDF: {output}")
+    if args.xfa:
+        colors.info(f"Embedded XFA template from: {args.xfa}")
     colors.info("Adjust any box in the CSV and rerun create-acroform if a field landed off.")
     return 0
 

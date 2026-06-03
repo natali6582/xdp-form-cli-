@@ -158,6 +158,11 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
         return pdf.make_indirect(widget)
 
     if spec.field_type in {"checkbox", "check", "chk"}:
+        # Override the transparent default with a visible inset border
+        # to match the XFA "lowered" edge style (border hand="right").
+        widget[Name("/Border")] = Array([0, 0, 1])
+        widget[Name("/BS")] = Dictionary(W=1, S=Name("/I"))
+        widget[Name("/MK")] = Dictionary(BC=Array([0, 0, 0]))
         widget[Name("/FT")] = Name("/Btn")
         widget[Name("/V")] = Name("/Yes") if _truthy(spec.value) else Name("/Off")
         widget[Name("/AS")] = widget[Name("/V")]
