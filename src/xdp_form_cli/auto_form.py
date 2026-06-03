@@ -88,6 +88,7 @@ def build_auto_form(
     output_path: str | Path,
     *,
     csv_path: str | Path | None = None,
+    xfa_template_path: str | Path | None = None,
 ) -> tuple[Path, Path, int]:
     """Build a fillable AcroForm from a URL or local PDF path.
 
@@ -115,7 +116,15 @@ def build_auto_form(
 
         write_field_csv(specs, csv_out)
 
-        if has_xfa:
+        if xfa_template_path is not None:
+            # User supplied an external XFA template: inject fields into it and
+            # embed the modified template in the output PDF alongside AcroForm.
+            from xdp_form_cli.xfa_field_injector import inject_xfa_fields_from_template
+
+            with_xfa_fields = Path(tmp_dir) / "with_xfa_fields.pdf"
+            inject_xfa_fields_from_template(local_source, xfa_template_path, with_xfa_fields, specs)
+            create_acroform_pdf(with_xfa_fields, csv_out, output)
+        elif has_xfa:
             # Preserve XFA: inject <field> elements into the template, then add
             # matching AcroForm widgets so both layers carry the same fields.
             from xdp_form_cli.xfa_field_injector import inject_xfa_fields

@@ -97,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional path for the emitted editable field CSV (defaults next to --output).",
     )
+    auto_form_parser.add_argument(
+        "--xfa",
+        default=None,
+        help="Optional XFA/XDP template file. Fields are injected into this template "
+        "and embedded in the output PDF alongside the AcroForm layer.",
+    )
 
     create_acroform = subparsers.add_parser(
         "create-acroform",
