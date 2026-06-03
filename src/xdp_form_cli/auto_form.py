@@ -32,7 +32,7 @@ import pikepdf
 from pikepdf import Name
 
 from xdp_form_cli.acroform_builder import create_acroform_pdf
-from xdp_form_cli.xfa_stripper import strip_xfa
+from xdp_form_cli.xfa_stripper import pdf_has_xfa, strip_xfa
 
 
 # Words that mark a box as a signature (image) field, in English and Hebrew.
@@ -99,7 +99,10 @@ def build_auto_form(
     with tempfile.TemporaryDirectory() as tmp_dir:
         local_source = _resolve_source(source, Path(tmp_dir))
 
-        # Strip XFA first so detection runs on the plain PDF we will fill.
+        has_xfa = pdf_has_xfa(local_source)
+
+        # Detection runs on a stripped copy so the content stream is the one
+        # the AcroForm will sit on top of, with no XFA-only quirks.
         stripped = Path(tmp_dir) / "stripped.pdf"
         strip_xfa(local_source, stripped)
 
@@ -111,7 +114,17 @@ def build_auto_form(
             )
 
         write_field_csv(specs, csv_out)
-        create_acroform_pdf(stripped, csv_out, output)
+
+        if has_xfa:
+            # Preserve XFA: inject <field> elements into the template, then add
+            # matching AcroForm widgets so both layers carry the same fields.
+            from xdp_form_cli.xfa_field_injector import inject_xfa_fields
+
+            with_xfa_fields = Path(tmp_dir) / "with_xfa_fields.pdf"
+            inject_xfa_fields(local_source, with_xfa_fields, specs)
+            create_acroform_pdf(with_xfa_fields, csv_out, output)
+        else:
+            create_acroform_pdf(stripped, csv_out, output)
 
     return output, csv_out, len(specs)
 
