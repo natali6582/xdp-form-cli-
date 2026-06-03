@@ -16,10 +16,11 @@ from pathlib import Path
 
 import pikepdf
 from lxml import etree
-from pikepdf import Array, Name, Stream
+from pikepdf import Array, Dictionary, Name, Stream
 
 from xdp_form_cli.auto_form import AutoFieldSpec
 from xdp_form_cli.pdf_xfa_editor import PdfXfaEditor
+from xdp_form_cli.xdp_editor import XdpEditor
 
 
 XFA_TEMPLATE_NS = "http://www.xfa.org/schema/xfa-template/2.5/"
