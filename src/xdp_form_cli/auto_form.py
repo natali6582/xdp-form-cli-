@@ -48,6 +48,10 @@ MAX_BOX_HEIGHT_PT = 120.0
 FIELD_FONT_SIZE_PT = 10.0
 MAX_FIELD_HEIGHT_PT = 2 * FIELD_FONT_SIZE_PT
 
+# Checkbox size gates (PDF points): small, approximately square rectangles.
+MIN_CHECKBOX_PT = 6.0
+MAX_CHECKBOX_PT = 20.0
+
 # Cap on a downloaded PDF to avoid pulling an unbounded response into memory.
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
@@ -125,6 +129,22 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
                 b for b in _detect_underline_boxes(page, page_index)
                 if not _overlaps_any(b, geo_boxes)
             ]
+            checkbox_boxes = [
+                b for b in _detect_checkbox_boxes(page, page_index)
+                if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
+            ]
+            # Filter geo_boxes to exclude ones that contain text.
+            geo_boxes = [b for b in geo_boxes if not _box_contains_text(b, anchors)]
+            # Checkboxes are typed directly; text/image boxes go through label analysis.
+            for box in checkbox_boxes:
+                label = _nearest_label(box, anchors)
+                base = _field_base_name(label, is_signature=False)
+                name = _unique_name(base, used_names)
+                specs.append(AutoFieldSpec(
+                    page=box.page, name=name, field_type="checkbox",
+                    x=round(box.x, 2), y=round(box.y, 2),
+                    w=round(box.w, 2), h=round(box.h, 2),
+                ))
             boxes = geo_boxes + underline_boxes
             for box in boxes:
                 label = _nearest_label(box, anchors)
@@ -296,6 +316,52 @@ def _overlaps_any(box: DetectedBox, others: list[DetectedBox]) -> bool:
     return False
 
 
+def _detect_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
+    """Detect small approximately-square rectangles as checkbox fields."""
+    checkboxes: list[tuple[float, float, float, float]] = []
+    pending: list[tuple[float, float, float, float]] = []
+    clip_pending: list[tuple[float, float, float, float]] = []
+    last_clip_rects: list[tuple[float, float, float, float]] = []
+
+    for token in pikepdf.parse_content_stream(page):
+        op = str(token.operator)
+
+        if op == "re":
+            try:
+                x, y, w, h = (float(v) for v in token.operands)
+            except (TypeError, ValueError):
+                continue
+            if w < 0: x, w = x + w, -w
+            if h < 0: y, h = y + h, -h
+            if (MIN_CHECKBOX_PT <= w <= MAX_CHECKBOX_PT
+                    and MIN_CHECKBOX_PT <= h <= MAX_CHECKBOX_PT
+                    and abs(w - h) / max(w, h) < 0.3):
+                pending.append((round(x, 1), round(y, 1), round(w, 1), round(h, 1)))
+
+        elif op == "Do":
+            for r in last_clip_rects:
+                if r in checkboxes:
+                    checkboxes.remove(r)
+            last_clip_rects.clear()
+
+        elif op in ("S", "s", "f", "F", "f*", "B", "B*", "b", "b*"):
+            checkboxes.extend(pending)
+            pending.clear()
+            clip_pending.clear()
+            last_clip_rects.clear()
+        elif op in ("W", "W*"):
+            clip_pending = list(pending)
+            pending.clear()
+        elif op == "n":
+            checkboxes.extend(clip_pending)
+            last_clip_rects = list(clip_pending)
+            clip_pending.clear()
+            pending.clear()
+
+    unique = sorted(set(checkboxes), key=lambda r: (-r[1], r[0]))
+    return [DetectedBox(page_index, x, y, w, h) for (x, y, w, h) in unique]
+
+
 def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
     clip_rects: list[tuple[float, float, float, float]] = []
     underline_candidates: list[tuple[float, float, float, float]] = []
@@ -446,6 +512,14 @@ def _operand_text(operand) -> str:
         return bytes(operand).decode("latin-1", errors="ignore")
     except (TypeError, ValueError):
         return str(operand)
+
+
+def _box_contains_text(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
+    """Return True if the box contains or overlaps with text anchors."""
+    for anchor in anchors:
+        if box.x <= anchor.x <= box.x + box.w and box.y <= anchor.y <= box.y + box.h:
+            return True
+    return False
 
 
 def _nearest_label(box: DetectedBox, anchors: list[TextAnchor]) -> str:
