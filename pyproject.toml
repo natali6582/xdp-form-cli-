@@ -8,7 +8,12 @@ version = "0.1.0"
 description = "CLI tools for safely copying and editing Adobe XDP/XFA files."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["lxml>=6.0.0", "pikepdf>=10.0.0"]
+dependencies = [
+    "lxml>=6.0.0",
+    "pikepdf>=10.0.0",
+    "Flask>=3.0.0",
+    "gunicorn>=23.0.0",
+]
 
 [project.scripts]
 xdp-form-cli = "xdp_form_cli.cli:main"
@@ -21,3 +26,6 @@ where = ["src"]
 
 [project.optional-dependencies]
 placement = ["Pillow>=10.0.0", "numpy>=1.24.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

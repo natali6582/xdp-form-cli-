@@ -502,20 +502,30 @@ def _validate_output_pdf(output_pdf: str | Path, fields: list[ParsedField]) -> l
             field_type = str(pdf_field.get("/FT"))
             if field_type == "/Sig":
                 issues.append(ValidationIssue("ERROR", "pdf-signature-field", "Output PDF contains /Sig field; image signatures should be /Btn pushbuttons.", field=name))
+            flags = int(pdf_field.get("/Ff", 0))
+            spec_types = spec_types_by_name.get(name, set())
+            if "image" in spec_types:
+                if not _has_image_pushbutton_format(pdf_field, field_type, flags):
+                    issues.append(
+                        ValidationIssue(
+                            "ERROR",
+                            "pdf-image-button-format",
+                            "Image fields must be /Btn pushbuttons with push highlighting, raised border, and grey background fill.",
+                            field=name,
+                        )
+                    )
             if _is_image_signature_name(name):
-                flags = int(pdf_field.get("/Ff", 0))
                 if field_type != "/Btn" or not (flags & 65536):
                     issues.append(
                         ValidationIssue("ERROR", "pdf-image-signature-format", "Image signature field must be a pushbutton /Btn with flag 65536.", field=name)
                     )
-            flags = int(pdf_field.get("/Ff", 0))
-            if field_type == "/Tx" or (field_type == "/Btn" and (flags & 65536)):
+            if field_type == "/Tx":
                 if _has_visible_fill_or_border(pdf_field):
                     issues.append(
                         ValidationIssue(
                             "ERROR",
                             "pdf-field-covers-original-content",
-                            "Text/image fields must be transparent: no visible border and no background fill.",
+                            "Text fields must be transparent: no visible border and no background fill.",
                             field=name,
                         )
                     )
@@ -561,3 +571,27 @@ def _has_visible_fill_or_border(pdf_field: object) -> bool:
         return True
 
     return False
+
+
+def _has_image_pushbutton_format(pdf_field: object, field_type: str, flags: int) -> bool:
+    if field_type != "/Btn" or not (flags & 65536):
+        return False
+    if pdf_field.get("/H") != "/P":
+        return False
+
+    border = pdf_field.get("/Border")
+    if border is None or len(border) < 3 or float(border[2]) <= 0:
+        return False
+
+    border_style = pdf_field.get("/BS")
+    if border_style is None:
+        return False
+    if float(border_style.get("/W", 0)) <= 0:
+        return False
+    if border_style.get("/S") != "/B":
+        return False
+
+    appearance = pdf_field.get("/MK")
+    if appearance is None:
+        return False
+    return "/BG" in appearance

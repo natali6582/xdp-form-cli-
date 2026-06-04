@@ -29,6 +29,8 @@ PT_TO_MM = 0.3528
 DEFAULT_FONT_TYPEFACE = "Arial"
 DEFAULT_FONT_SIZE_PT = 10.0
 CHECKBOX_TYPEFACE = "Adobe Pi Std"
+BUTTON_TYPEFACE = "Myriad Pro"
+BUTTON_FILL_COLOR = "212,208,200"
 
 
 def inject_xfa_fields(
@@ -219,7 +221,26 @@ def _populate_checkbox(field: etree._Element) -> None:
 
 def _populate_image(field: etree._Element) -> None:
     ui = etree.SubElement(field, f"{{{XFA_TEMPLATE_NS}}}ui")
-    etree.SubElement(ui, f"{{{XFA_TEMPLATE_NS}}}imageEdit")
-    value = etree.SubElement(field, f"{{{XFA_TEMPLATE_NS}}}value")
-    image = etree.SubElement(value, f"{{{XFA_TEMPLATE_NS}}}image")
-    image.set("contentType", "image/png")
+    button = etree.SubElement(ui, f"{{{XFA_TEMPLATE_NS}}}button")
+    button.set("highlight", "push")
+
+    font = etree.SubElement(field, f"{{{XFA_TEMPLATE_NS}}}font")
+    font.set("typeface", BUTTON_TYPEFACE)
+
+    caption = etree.SubElement(field, f"{{{XFA_TEMPLATE_NS}}}caption")
+    caption_para = etree.SubElement(caption, f"{{{XFA_TEMPLATE_NS}}}para")
+    caption_para.set("vAlign", "middle")
+    caption_para.set("hAlign", "center")
+
+    border = etree.SubElement(field, f"{{{XFA_TEMPLATE_NS}}}border")
+    border.set("hand", "right")
+    border.set("break", "open")
+    edge = etree.SubElement(border, f"{{{XFA_TEMPLATE_NS}}}edge")
+    edge.set("stroke", "raised")
+    edge.set("cap", "butt")
+    fill = etree.SubElement(border, f"{{{XFA_TEMPLATE_NS}}}fill")
+    color = etree.SubElement(fill, f"{{{XFA_TEMPLATE_NS}}}color")
+    color.set("value", BUTTON_FILL_COLOR)
+
+    bind = etree.SubElement(field, f"{{{XFA_TEMPLATE_NS}}}bind")
+    bind.set("match", "none")

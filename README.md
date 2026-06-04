@@ -11,7 +11,8 @@ The tool is fund-agnostic. Do not encode investment fund, real-estate fund, or d
 - Replaces one page subform from an XML fragment file
 - Creates AcroForm fields over static PDFs from a CSV field specification
 - Validates field specs and generated PDFs before/after AcroForm creation
-- Generates text and image fields as transparent widgets so they do not cover original PDF text
+- Generates text fields as transparent widgets so they do not cover original PDF text
+- Generates image/signature placeholders as LiveCycle-style push buttons, not PDF `/Sig` fields
 - Converts embedded field names to canonical names extracted from the Plan-T code file
 - Forces generated or modified fields to use Arial
 - Treats explicitly approved visually-filled fields as known fields
@@ -31,6 +32,40 @@ The tool is fund-agnostic. Do not encode investment fund, real-estate fund, or d
 ```powershell
 python -m pip install -e .
 ```
+
+## Internal web app
+
+This repository also includes a small web app for review flows:
+
+- upload a flat PDF and run auto-detection
+- download the generated fillable PDF
+- download the generated editable CSV
+- or upload two PDFs together:
+  - template/old PDF that already contains fields
+  - blank/new PDF with the same layout
+  - the app copies the field structure from the template onto the new PDF
+
+Run locally:
+
+```powershell
+python -m flask --app xdp_form_cli.web_app run
+```
+
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000).
+
+### Render deployment
+
+Use Render as a **Docker Web Service**, not a plain Python Web Service. The detection flow depends on Poppler tools such as `pdftotext` and `pdftoppm`, and the Docker image installs them explicitly.
+
+Recommended setup:
+
+- Repository: `natali6582/xdp-form-cli`
+- Runtime: `Docker`
+- Branch: `master`
+- Plan: at least `Starter`
+- Health check path: `/healthz`
+
+You can either create the service from `render.yaml` or create a new Docker web service and let Render detect the repository `Dockerfile`.
 
 ## Commands
 

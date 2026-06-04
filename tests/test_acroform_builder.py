@@ -103,7 +103,7 @@ def test_create_acroform_never_writes_real_signature_fields(tmp_path: Path) -> N
         assert fields[0].get(Name("/Ff")) == 65536
 
 
-def test_generated_fields_are_transparent_and_checkboxes_have_appearances(tmp_path: Path) -> None:
+def test_generated_text_fields_are_transparent_images_are_push_buttons_and_checkboxes_have_appearances(tmp_path: Path) -> None:
     source = _write_blank_pdf(tmp_path / "source.pdf")
     specs = _write_field_specs(
         tmp_path / "fields.csv",
@@ -122,14 +122,24 @@ def test_generated_fields_are_transparent_and_checkboxes_have_appearances(tmp_pa
         fields = pdf.Root[Name("/AcroForm")][Name("/Fields")]
         assert len(fields) == 4
 
+        transparent_names = {"txtInvestorName", "txtNotes"}
         for field in fields:
+            if str(field.get(Name("/T"))) not in transparent_names:
+                continue
             assert field.get(Name("/BS"), {}).get(Name("/W")) == 0
             assert list(field.get(Name("/Border"), [])) == [0, 0, 0]
             assert Name("/BG") not in field.get(Name("/MK"), {})
 
         image_field = next(field for field in fields if str(field.get(Name("/T"))) == "imgPersonSignature")
-        image_appearance = image_field[Name("/AP")][Name("/N")]
-        assert bytes(image_appearance.read_bytes()) == b""
+        assert image_field.get(Name("/FT")) == Name("/Btn")
+        assert int(image_field.get(Name("/Ff"), 0)) & 65536
+        assert image_field.get(Name("/H")) == Name("/P")
+        assert list(image_field.get(Name("/Border"), [])) == [0, 0, 1]
+        assert image_field[Name("/BS")].get(Name("/S")) == Name("/B")
+        assert float(image_field[Name("/BS")].get(Name("/W"))) > 0
+        background = [round(float(value), 3) for value in image_field[Name("/MK")][Name("/BG")]]
+        assert background == [round(212 / 255, 3), round(208 / 255, 3), round(200 / 255, 3)]
+        assert Name("/BC") in image_field[Name("/MK")]
 
         checkbox = next(field for field in fields if str(field.get(Name("/T"))) == "chkApproved")
         normal_appearance = checkbox[Name("/AP")][Name("/N")]

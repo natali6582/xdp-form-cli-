@@ -12,6 +12,7 @@ from pikepdf import Array, Dictionary, Name, String
 ACROFORM_FONT_RESOURCE = "Arial"
 ACROFORM_DEFAULT_APPEARANCE = f"/{ACROFORM_FONT_RESOURCE} 10 Tf 0 g"
 SUPPORTED_TYPES = {"text", "tx", "textarea", "checkbox", "check", "chk", "image", "img"}
+BUTTON_BACKGROUND = (212 / 255, 208 / 255, 200 / 255)
 BENEFICIARY_TABLE_COLUMNS = (
     "Name",
     "ID",
@@ -180,7 +181,14 @@ def _build_widget(pdf: pikepdf.Pdf, page_obj: Dictionary, spec: AcroFieldSpec) -
         widget[Name("/FT")] = Name("/Btn")
         # Pushbutton widgets are the closest AcroForm placeholder for image injection.
         widget[Name("/Ff")] = 65536
-        widget[Name("/AP")] = Dictionary(N=_make_empty_appearance(pdf, spec.w, spec.h))
+        widget[Name("/H")] = Name("/P")
+        widget[Name("/Border")] = Array([0, 0, 1])
+        widget[Name("/BS")] = Dictionary(W=1, S=Name("/B"))
+        widget[Name("/MK")] = Dictionary(
+            BG=Array(BUTTON_BACKGROUND),
+            BC=Array([0, 0, 0]),
+        )
+        widget[Name("/AP")] = Dictionary(N=_make_pushbutton_appearance(pdf, spec.w, spec.h))
         return pdf.make_indirect(widget)
 
     raise ValueError(
@@ -235,6 +243,22 @@ def _make_checkbox_yes_appearance(pdf: pikepdf.Pdf, width: float, height: float)
     x2 = max(x1 + 1.0, width * 0.82)
     y2 = max(y0 + 1.0, height * 0.82)
     commands = f"q 1.4 w 0 0 0 RG {x0:.2f} {y0:.2f} m {x1:.2f} {y1:.2f} l {x2:.2f} {y2:.2f} l S Q"
+    return _make_appearance_stream(pdf, commands.encode("ascii"), width, height)
+
+
+def _make_pushbutton_appearance(pdf: pikepdf.Pdf, width: float, height: float) -> pikepdf.Stream:
+    bg_r, bg_g, bg_b = BUTTON_BACKGROUND
+    inset_w = max(width - 1.0, 0.0)
+    inset_h = max(height - 1.0, 0.0)
+    commands = (
+        "q "
+        f"{bg_r:.4f} {bg_g:.4f} {bg_b:.4f} rg 0 0 {width:.2f} {height:.2f} re f "
+        "1 1 1 RG 0.5 w 0.5 0.5 m 0.5 "
+        f"{inset_h:.2f} l {inset_w:.2f} {inset_h:.2f} l S "
+        "0.35 0.35 0.35 RG 0.5 w "
+        f"0.5 0.5 m {inset_w:.2f} 0.5 l {inset_w:.2f} {inset_h:.2f} l S "
+        "Q"
+    )
     return _make_appearance_stream(pdf, commands.encode("ascii"), width, height)
 
 
