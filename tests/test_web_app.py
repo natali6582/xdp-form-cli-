@@ -35,6 +35,9 @@ def test_index_renders_upload_form(tmp_path: Path) -> None:
     assert response.status_code == 200
     text = response.get_data(as_text=True)
     assert "Upload PDF" in text
+    assert "PDF without fields" in text
+    assert "template_file" not in text
+    assert "Optional template" not in text
     assert "multipart/form-data" in text
 
 
@@ -105,36 +108,18 @@ def test_upload_builds_pdf_and_csv_and_exposes_downloads(tmp_path: Path) -> None
     assert "page,name,type,x,y,w,h,value" in csv_download.get_data(as_text=True)
 
 
-def test_upload_accepts_template_pdf_and_blank_target_pdf(tmp_path: Path) -> None:
-    from xdp_form_cli.acroform_builder import create_acroform_pdf
-
-    template_blank = _write_uploadable_pdf(tmp_path / "template_blank.pdf")
-    template_fields = tmp_path / "template_fields.csv"
-    template_fields.write_text(
-        "\n".join(
-            [
-                "page,name,type,x,y,w,h,value",
-                "1,txtInvestorName,text,150,352,140,14,",
-                "1,checkboxConsent,checkbox,150,296,10,10,",
-                "1,imgPersonSignature,image,150,226,140,24,",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    template_with_fields = tmp_path / "template_with_fields.pdf"
-    create_acroform_pdf(template_blank, template_fields, template_with_fields)
-
-    target_blank = _write_uploadable_pdf(tmp_path / "target_blank.pdf")
+def test_upload_ignores_unexpected_template_file_and_uses_single_pdf_flow(tmp_path: Path) -> None:
+    source = _write_uploadable_pdf(tmp_path / "source.pdf")
+    extra = _write_uploadable_pdf(tmp_path / "extra.pdf")
     app = create_app({"TESTING": True, "JOB_STORAGE_DIR": tmp_path / "jobs"})
     client = app.test_client()
 
-    with template_with_fields.open("rb") as template_handle, target_blank.open("rb") as target_handle:
+    with source.open("rb") as source_handle, extra.open("rb") as extra_handle:
         response = client.post(
             "/upload",
             data={
-                "template_file": (template_handle, template_with_fields.name),
-                "file": (target_handle, target_blank.name),
+                "file": (source_handle, source.name),
+                "template_file": (extra_handle, extra.name),
             },
             content_type="multipart/form-data",
         )
@@ -142,8 +127,7 @@ def test_upload_accepts_template_pdf_and_blank_target_pdf(tmp_path: Path) -> Non
     assert response.status_code == 200
     page = response.get_data(as_text=True)
     assert "Output PDF ready" in page
+    assert "template-transfer" not in page
     job_dir = next((tmp_path / "jobs").iterdir())
-    output_csv = job_dir / "target_blank_fields.csv"
-    csv_text = output_csv.read_text(encoding="utf-8")
-    assert "imgPersonSignature,image" in csv_text
-    assert "checkboxConsent,checkbox" in csv_text
+    output_csv = job_dir / "source_fields.csv"
+    assert output_csv.is_file()

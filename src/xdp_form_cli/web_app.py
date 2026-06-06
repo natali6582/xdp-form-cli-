@@ -10,7 +10,6 @@ from flask import Flask, abort, render_template_string, request, send_file
 
 from xdp_form_cli.auto_form import MAX_DOWNLOAD_BYTES, build_auto_client_form
 from xdp_form_cli.acroform_builder import load_field_specs
-from xdp_form_cli.field_transfer import transfer_fields_to_pdf
 
 
 INDEX_TEMPLATE = """
@@ -31,15 +30,13 @@ INDEX_TEMPLATE = """
 </head>
 <body>
   <h1>Upload PDF</h1>
-  <p class="muted">Upload a blank/new PDF. Optionally upload an older fielded PDF with the same layout to copy its fields.</p>
+  <p class="muted">Upload one PDF without fields. The app will detect and create fillable fields automatically.</p>
   {% if error %}
   <div class="error">{{ error }}</div>
   {% endif %}
   <form method="post" action="/upload" enctype="multipart/form-data">
-    <p><strong>Blank/new PDF</strong></p>
+    <p><strong>PDF without fields</strong></p>
     <input type="file" name="file" accept="application/pdf,.pdf" required>
-    <p><strong>Optional template PDF with existing fields</strong></p>
-    <input type="file" name="template_file" accept="application/pdf,.pdf">
     <button type="submit">Build fillable PDF</button>
   </form>
   {% if result %}
@@ -86,21 +83,12 @@ def create_app(config: dict | None = None) -> Flask:
     @app.post("/upload")
     def upload():
         file = request.files.get("file")
-        template_file = request.files.get("template_file")
         if file is None or not file.filename:
             return render_template_string(INDEX_TEMPLATE, error="Choose a PDF file to upload.", result=None), 400
 
         original_name = Path(file.filename).name
         if Path(original_name).suffix.lower() != ".pdf":
             return render_template_string(INDEX_TEMPLATE, error="Only .pdf uploads are supported.", result=None), 400
-        if template_file is not None and template_file.filename:
-            template_name = Path(template_file.filename).name
-            if Path(template_name).suffix.lower() != ".pdf":
-                return render_template_string(
-                    INDEX_TEMPLATE,
-                    error="Template file must also be a .pdf.",
-                    result=None,
-                ), 400
 
         display_stem = Path(original_name).stem or "uploaded"
         job_id = uuid.uuid4().hex
@@ -113,20 +101,11 @@ def create_app(config: dict | None = None) -> Flask:
         manifest_path = job_dir / "manifest.json"
 
         file.save(input_pdf)
-        template_pdf = None
-        if template_file is not None and template_file.filename:
-            template_pdf = job_dir / Path(template_file.filename).name
-            template_file.save(template_pdf)
 
         try:
-            if template_pdf is not None:
-                _, _, count = transfer_fields_to_pdf(template_pdf, input_pdf, output_pdf, csv_path=output_csv)
-                summary_text = "template-transfer"
-                warnings = ()
-            else:
-                _, _, count, summary = build_auto_client_form(input_pdf, output_pdf, csv_path=output_csv)
-                summary_text = _format_type_counts(summary.type_counts)
-                warnings = summary.warnings
+            _, _, count, summary = build_auto_client_form(input_pdf, output_pdf, csv_path=output_csv)
+            summary_text = _format_type_counts(summary.type_counts)
+            warnings = summary.warnings
         except Exception as exc:  # pragma: no cover - exact PDF parser exceptions vary
             return render_template_string(INDEX_TEMPLATE, error=str(exc), result=None), 500
 
