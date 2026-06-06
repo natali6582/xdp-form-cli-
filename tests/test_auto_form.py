@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pikepdf
+import pytest
 from pikepdf import Dictionary, Name
 
 from xdp_form_cli.auto_form import (
+    AutoFieldSpec,
     MAX_FIELD_HEIGHT_PT,
+    build_auto_client_form,
     build_auto_form,
     detect_field_specs,
+    _apply_signature_context_rows,
+    _bbox_checkbox_boxes_from_xml,
+    _bbox_underline_boxes_from_xml,
+    _checkbox_base_name,
+    _filter_specs_by_original_content,
+    _matches_signature_context_word,
     write_field_csv,
 )
+from xdp_form_cli.cli import main
 
 
 def _write_boxed_pdf(path: Path) -> Path:
@@ -108,3 +119,656 @@ def test_write_field_csv_has_header(tmp_path: Path) -> None:
 
     header = csv_path.read_text(encoding="utf-8").splitlines()[0]
     assert header == "page,name,type,x,y,w,h,value"
+
+
+def _write_client_pdf_with_checkbox_and_signature(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(360, 420))
+    content = (
+        b"BT /F1 10 Tf 40 360 Td (Investor name) Tj ET\n"
+        b"BT /F1 10 Tf 40 300 Td (I approve) Tj ET\n"
+        b"BT /F1 10 Tf 40 240 Td (Signature) Tj ET\n"
+        b"150 352 160 14 re S\n"
+        b"150 296 10 10 re S\n"
+        b"150 226 160 24 re S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_build_auto_client_form_detects_text_checkbox_and_image(tmp_path: Path) -> None:
+    source = _write_client_pdf_with_checkbox_and_signature(tmp_path / "client.pdf")
+    output = tmp_path / "client_acroform.pdf"
+    csv_path = tmp_path / "client_fields.csv"
+
+    out_pdf, out_csv, count, summary = build_auto_client_form(source, output, csv_path=csv_path)
+
+    assert out_pdf == output
+    assert out_csv == csv_path
+    assert count == 3
+    assert summary.type_counts == {"checkbox": 1, "image": 1, "text": 1}
+    csv_text = csv_path.read_text(encoding="utf-8")
+    assert ",checkbox," in csv_text
+    assert ",image," in csv_text
+
+    with pikepdf.Pdf.open(output) as pdf:
+        fields = pdf.Root[Name("/AcroForm")][Name("/Fields")]
+        assert len(fields) == 3
+        assert not any(field.get(Name("/FT")) == Name("/Sig") for field in fields)
+
+
+def test_auto_client_form_cli_writes_pdf_and_csv(tmp_path: Path) -> None:
+    source = _write_client_pdf_with_checkbox_and_signature(tmp_path / "client.pdf")
+    output = tmp_path / "client_acroform.pdf"
+    csv_path = tmp_path / "client_fields.csv"
+
+    exit_code = main([
+        "auto-client-form",
+        "--input", str(source),
+        "--output", str(output),
+        "--fields-csv", str(csv_path),
+    ])
+
+    assert exit_code == 0
+    assert output.is_file()
+    assert csv_path.is_file()
+
+
+def _write_line_drawn_checkbox_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    content = (
+        b"BT /F1 10 Tf 50 300 Td (Confirm) Tj ET\n"
+        b"120 296 m 132 296 l 132 308 l 120 308 l h S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_finds_line_drawn_checkboxes(tmp_path: Path) -> None:
+    source = _write_line_drawn_checkbox_pdf(tmp_path / "line_checkbox.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].field_type == "checkbox"
+    assert specs[0].x == 120.0
+    assert specs[0].y == 296.0
+    assert specs[0].w == 12.0
+    assert specs[0].h == 12.0
+    assert specs[0].name.startswith("checkbox")
+
+
+def _write_glyph_checkbox_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    content = (
+        b"BT /F1 10 Tf 50 300 Td (Confirm) Tj ET\n"
+        b"BT /TT3 12 Tf 120 296 Td (\000\206) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_finds_glyph_checkboxes(tmp_path: Path) -> None:
+    source = _write_glyph_checkbox_pdf(tmp_path / "glyph_checkbox.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].field_type == "checkbox"
+    assert specs[0].x == 120.0
+    assert specs[0].y == 296.0
+    assert specs[0].w == 12.0
+    assert specs[0].h == 12.0
+    assert specs[0].name.startswith("checkbox")
+
+
+def test_checkbox_base_name_uses_checkbox_prefix() -> None:
+    assert _checkbox_base_name("Insurance confirmation") == "checkboxInsuranceConfirmation"
+    assert _checkbox_base_name("BBBBBBBBBBBBBBBB") == "checkboxField"
+
+
+def test_bbox_checkbox_detection_finds_small_square_next_to_text() -> None:
+    xml = """
+    <page width="420.000000" height="400.000000">
+      <word xMin="100.000000" yMin="100.000000" xMax="250.000000" yMax="112.000000">Insurance</word>
+      <word xMin="270.000000" yMin="98.000000" xMax="286.000000" yMax="114.000000">□</word>
+    </page>
+    """
+
+    boxes = _bbox_checkbox_boxes_from_xml(xml)
+
+    assert list(boxes) == [1]
+    assert len(boxes[1]) == 1
+    assert boxes[1][0].x == 270.0
+    assert boxes[1][0].y == 286.0
+    assert boxes[1][0].w == 16.0
+    assert boxes[1][0].h == 16.0
+
+
+def test_bbox_checkbox_detection_ignores_square_without_text_context() -> None:
+    xml = """
+    <page width="420.000000" height="400.000000">
+      <word xMin="270.000000" yMin="98.000000" xMax="286.000000" yMax="114.000000">□</word>
+    </page>
+    """
+
+    boxes = _bbox_checkbox_boxes_from_xml(xml)
+
+    assert boxes == {}
+
+
+def _write_underlined_heading_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    content = (
+        b"BT /F1 12 Tf 100 350 Td (Governing Law) Tj ET\n"
+        b"80 320 160 0.8 re S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_ignores_underlined_headings(tmp_path: Path) -> None:
+    source = _write_underlined_heading_pdf(tmp_path / "heading.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert specs == []
+
+
+def _write_table_row_separator_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(360, 420))
+    content = (
+        b"80 300 240 0.8 re S\n"
+        b"BT /F1 10 Tf 90 292 Td (Long table content, not a field label) Tj ET\n"
+        b"BT /F1 10 Tf 90 280 Td (More paragraph content below the row separator) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_ignores_table_row_separators_with_content_below(tmp_path: Path) -> None:
+    source = _write_table_row_separator_pdf(tmp_path / "table_row.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert specs == []
+
+
+def _write_table_cell_with_adjacent_column_text_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(380, 420))
+    content = (
+        b"80 300 240 0.8 re S\n"
+        b"BT /F1 10 Tf 330 312 Td (Adjacent) Tj ET\n"
+        b"BT /F1 10 Tf 330 304 Td (column) Tj ET\n"
+        b"BT /F1 10 Tf 330 296 Td (content) Tj ET\n"
+        b"BT /F1 10 Tf 330 288 Td (not label) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_ignores_table_cells_with_busy_adjacent_text(tmp_path: Path) -> None:
+    source = _write_table_cell_with_adjacent_column_text_pdf(tmp_path / "table_cell.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert specs == []
+
+
+def _write_same_line_underline_pdf(path: Path, label_before: bool) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    if label_before:
+        content = (
+            b"BT /F1 10 Tf 40 300 Td (Name:) Tj ET\n"
+            b"90 297 120 0.8 re S\n"
+        )
+    else:
+        content = (
+            b"40 297 120 0.8 re S\n"
+            b"BT /F1 10 Tf 170 300 Td (Number) Tj ET\n"
+        )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_keeps_underlines_with_label_before(tmp_path: Path) -> None:
+    source = _write_same_line_underline_pdf(tmp_path / "before.pdf", label_before=True)
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].field_type == "text"
+    assert specs[0].x == 90.0
+    assert specs[0].y == 297.0
+    assert specs[0].w == 120.0
+    assert specs[0].h == 12.0
+
+
+def test_detect_field_specs_keeps_underlines_with_label_after(tmp_path: Path) -> None:
+    source = _write_same_line_underline_pdf(tmp_path / "after.pdf", label_before=False)
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].field_type == "text"
+    assert specs[0].x == 40.0
+    assert specs[0].y == 297.0
+    assert specs[0].w == 120.0
+
+
+def _write_below_label_underline_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    content = (
+        b"80 300 160 0.8 re S\n"
+        b"BT /F1 10 Tf 125 286 Td (Signature) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_keeps_underlines_with_label_below(tmp_path: Path) -> None:
+    source = _write_below_label_underline_pdf(tmp_path / "below.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].field_type == "image"
+    assert specs[0].x == 80.0
+    assert specs[0].y == 300.0
+    assert specs[0].w == 160.0
+
+
+def _write_long_below_label_underline_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(420, 400))
+    content = (
+        b"90 300 220 0.8 re S\n"
+        b"BT /F1 10 Tf 95 292 Td (Commitment amount approved by the authorized general partner:) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_keeps_underlines_with_long_single_line_label_below(tmp_path: Path) -> None:
+    source = _write_long_below_label_underline_pdf(tmp_path / "long_below.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].x == 90.0
+    assert specs[0].y == 300.0
+    assert specs[0].w == 220.0
+
+
+def _write_scaled_tm_below_label_underline_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(420, 400))
+    content = (
+        b"90 300 220 0.8 re S\n"
+        b"BT /F1 1 Tf 10 0 0 10 0 0 Tm 9.5 29.2 Td (Commitment amount approved by the authorized general partner:) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_uses_scaled_text_matrix_for_below_labels(tmp_path: Path) -> None:
+    source = _write_scaled_tm_below_label_underline_pdf(tmp_path / "scaled_below.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].x == 90.0
+    assert specs[0].y == 300.0
+    assert specs[0].w == 220.0
+
+
+def _write_section_number_below_underline_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(420, 400))
+    content = (
+        b"90 300 120 0.8 re S\n"
+        b"BT /F1 10 Tf 160 292 Td (2.1) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_does_not_treat_section_numbers_as_labels(tmp_path: Path) -> None:
+    source = _write_section_number_below_underline_pdf(tmp_path / "section_number.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert specs == []
+
+
+def _write_dark_content_overlap_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(420, 400))
+    content = b"0 g 100 303 30 4 re f\n"
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_filter_specs_by_original_content_drops_fields_over_dark_content(tmp_path: Path) -> None:
+    if shutil.which("pdftoppm") is None:
+        pytest.skip("pdftoppm is not installed")
+    pytest.importorskip("PIL")
+    source = _write_dark_content_overlap_pdf(tmp_path / "dark_overlap.pdf")
+    bad = AutoFieldSpec(page=1, name="txtBad", field_type="text", x=90.0, y=300.0, w=120.0, h=12.0)
+    good = AutoFieldSpec(page=1, name="txtGood", field_type="text", x=90.0, y=250.0, w=120.0, h=12.0)
+
+    filtered = _filter_specs_by_original_content(source, [bad, good])
+
+    assert filtered == [good]
+
+
+def _write_neighboring_underlines_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(360, 420))
+    content = (
+        b"80 300 100 0.8 re S\n"
+        b"220 300 100 0.8 re S\n"
+        b"BT /F1 10 Tf 245 286 Td (Name) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_keeps_neighboring_blank_lines_when_one_has_label(tmp_path: Path) -> None:
+    source = _write_neighboring_underlines_pdf(tmp_path / "neighboring.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 2
+    assert {spec.x for spec in specs} == {80.0, 220.0}
+
+
+def _write_horizontal_line_field_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    content = (
+        b"BT /F1 10 Tf 40 300 Td (Email:) Tj ET\n"
+        b"90 297 m 210 297 l S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_finds_horizontal_line_fields(tmp_path: Path) -> None:
+    source = _write_horizontal_line_field_pdf(tmp_path / "horizontal_line.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].field_type == "text"
+    assert specs[0].x == 90.0
+    assert specs[0].y == 297.0
+    assert specs[0].w == 120.0
+    assert specs[0].h == 12.0
+
+
+def _write_dot_prefixed_underscore_text_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    content = b"BT /F1 10 Tf 120 300 Td (._______________) Tj ET\n"
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_ignores_dot_prefixed_underscore_text(tmp_path: Path) -> None:
+    source = _write_dot_prefixed_underscore_text_pdf(tmp_path / "dot_underscore.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert specs == []
+
+
+def _write_two_underscore_fields_in_one_text_op_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(420, 400))
+    content = (
+        b"BT /F1 10 Tf 40 300 Td (Name ____________ Phone ____________) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_finds_multiple_underscore_fields_on_same_text_line(tmp_path: Path) -> None:
+    source = _write_two_underscore_fields_in_one_text_op_pdf(tmp_path / "two_fields.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 2
+    assert [spec.field_type for spec in specs] == ["text", "text"]
+    assert [spec.h for spec in specs] == [12.0, 12.0]
+    assert specs[0].x < specs[1].x
+    assert specs[0].w == specs[1].w
+
+
+def _write_symbol_bounded_underscore_text_pdf(path: Path, text: bytes) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(420, 400))
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(
+        b"BT /F1 10 Tf 40 300 Td (" + text + b") Tj ET\n"
+    )
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_keeps_underscore_field_between_symbol_and_text(tmp_path: Path) -> None:
+    source = _write_symbol_bounded_underscore_text_pdf(
+        tmp_path / "symbol_before.pdf",
+        b"%____________________Amount",
+    )
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].field_type == "text"
+    assert specs[0].x > 40
+    assert specs[0].w >= 100
+
+
+def test_detect_field_specs_keeps_underscore_field_between_text_and_symbol(tmp_path: Path) -> None:
+    source = _write_symbol_bounded_underscore_text_pdf(
+        tmp_path / "symbol_after.pdf",
+        b"Amount____________________%",
+    )
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].field_type == "text"
+    assert specs[0].x > 60
+    assert specs[0].w >= 100
+
+
+def test_bbox_underline_detection_keeps_field_between_symbol_and_text() -> None:
+    xml = """
+    <page width="420.000000" height="400.000000">
+      <word xMin="100.000000" yMin="100.000000" xMax="110.000000" yMax="112.000000">%</word>
+      <word xMin="110.000000" yMin="100.000000" xMax="170.000000" yMax="112.000000">________</word>
+      <word xMin="178.000000" yMin="100.000000" xMax="230.000000" yMax="112.000000">Amount</word>
+    </page>
+    """
+
+    boxes = _bbox_underline_boxes_from_xml(xml)
+
+    assert list(boxes) == [1]
+    assert len(boxes[1]) == 1
+    assert boxes[1][0].x == 110.0
+    assert boxes[1][0].y == 288.0
+    assert boxes[1][0].w == 60.0
+
+
+def test_bbox_underline_detection_keeps_field_between_text_and_symbol() -> None:
+    xml = """
+    <page width="420.000000" height="400.000000">
+      <word xMin="100.000000" yMin="100.000000" xMax="220.000000" yMax="112.000000">Amount________%</word>
+    </page>
+    """
+
+    boxes = _bbox_underline_boxes_from_xml(xml)
+
+    assert len(boxes[1]) == 1
+    assert boxes[1][0].x > 130.0
+    assert boxes[1][0].w >= 60.0
+
+
+def test_bbox_underline_detection_ignores_contextless_dot_prefixed_line() -> None:
+    xml = """
+    <page width="420.000000" height="400.000000">
+      <word xMin="100.000000" yMin="100.000000" xMax="190.000000" yMax="112.000000">._______________</word>
+    </page>
+    """
+
+    boxes = _bbox_underline_boxes_from_xml(xml)
+
+    assert boxes == {}
+
+
+def _write_cid_repeated_glyph_underline_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(420, 400))
+    page = pdf.pages[0]
+    descendant = Dictionary(
+        Type=Name("/Font"),
+        Subtype=Name("/CIDFontType2"),
+        DW=500,
+        W=[65, [500], 66, [500]],
+    )
+    font = Dictionary(
+        Type=Name("/Font"),
+        Subtype=Name("/Type0"),
+        BaseFont=Name("/TestCID"),
+        DescendantFonts=[descendant],
+    )
+    page.obj[Name("/Resources")] = Dictionary(Font=Dictionary(TT2=font))
+    content = b"BT /TT2 1 Tf 10 0 0 10 40 300 Tm <0041004200420042004200420042004200420042004200420042> Tj ET\n"
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_finds_cid_repeated_glyph_underlines(tmp_path: Path) -> None:
+    source = _write_cid_repeated_glyph_underline_pdf(tmp_path / "cid_repeated.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].field_type == "text"
+    assert specs[0].x == 45.0
+    assert specs[0].y == 300.0
+    assert specs[0].w == 60.0
+    assert specs[0].h == 12.0
+
+
+def _write_label_next_to_cid_repeated_glyph_underline_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(420, 400))
+    page = pdf.pages[0]
+    descendant = Dictionary(
+        Type=Name("/Font"),
+        Subtype=Name("/CIDFontType2"),
+        DW=500,
+        W=[66, [500]],
+    )
+    cid_font = Dictionary(
+        Type=Name("/Font"),
+        Subtype=Name("/Type0"),
+        BaseFont=Name("/TestCID"),
+        DescendantFonts=[descendant],
+    )
+    latin_font = Dictionary(
+        Type=Name("/Font"),
+        Subtype=Name("/Type1"),
+        BaseFont=Name("/Helvetica"),
+    )
+    page.obj[Name("/Resources")] = Dictionary(Font=Dictionary(F1=latin_font, TT2=cid_font))
+    content = (
+        b"BT /F1 10 Tf 60 300 Td (By :) Tj ET\n"
+        b"BT /TT2 1 Tf 10 0 0 10 100 300 Tm <004200420042004200420042004200420042004200420042> Tj ET\n"
+    )
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_names_cid_repeated_glyph_field_from_real_label(tmp_path: Path) -> None:
+    source = _write_label_next_to_cid_repeated_glyph_underline_pdf(tmp_path / "cid_label.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert len(specs) == 1
+    assert specs[0].name == "txtBy"
+
+
+def test_repeated_glyph_noise_is_not_used_as_field_name() -> None:
+    source_name = "BBBBBBBBBBBBBBBB"
+
+    from xdp_form_cli.auto_form import _field_base_name
+
+    assert _field_base_name(source_name, is_signature=False) == "txtField"
+
+
+def test_matches_signature_context_word_in_reversed_hebrew() -> None:
+    assert _matches_signature_context_word("םותחה") is True
+    assert _matches_signature_context_word("המיתח") is True
+    assert _matches_signature_context_word("חוקלה") is False
+
+
+def test_apply_signature_context_rows_marks_only_closest_row_below_context_as_images() -> None:
+    specs = [
+        AutoFieldSpec(page=11, name="txtLeft", field_type="text", x=100.0, y=280.0, w=120.0, h=12.0),
+        AutoFieldSpec(page=11, name="txtRight", field_type="text", x=380.0, y=280.0, w=120.0, h=12.0),
+        AutoFieldSpec(page=11, name="txtName", field_type="text", x=230.0, y=268.0, w=170.0, h=12.0),
+        AutoFieldSpec(page=12, name="txtOther", field_type="text", x=100.0, y=280.0, w=120.0, h=12.0),
+    ]
+
+    updated = _apply_signature_context_rows(specs, [(11, 336.0)])
+
+    by_name = {spec.name: spec for spec in updated}
+    assert by_name["imgLeft"].field_type == "image"
+    assert by_name["imgRight"].field_type == "image"
+    assert by_name["txtName"].field_type == "text"
+    assert by_name["txtOther"].field_type == "text"

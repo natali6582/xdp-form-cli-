@@ -137,6 +137,14 @@ xdp-form-cli validate-acroform --input "C:\path\static.pdf" --fields "C:\path\fi
 
 `create-acroform` runs validation automatically before and after creating the output PDF. Add `--strict-validation` when warnings should block creation. If `pdftoppm` and Pillow are available, validation also renders the source PDF and warns when a field rectangle appears to sit on existing dark content, which can indicate that the field may overlap original text.
 
+Build a fillable PDF from a client-uploaded flat PDF with no existing fields:
+
+```powershell
+xdp-form-cli auto-client-form --input "C:\path\uploaded.pdf" --output "C:\path\uploaded_acroform.pdf" --fields-csv "C:\path\uploaded_fields.csv"
+```
+
+`auto-client-form` detects visible field areas, including text underlines/boxes, vector checkboxes, glyph-rendered checkboxes, and signature labels when they can be read from the PDF. It keeps fill lines that have a label before, after, or below the line, including cases such as `example____`, `____example`, `example____example`, `*____`, `By: ____`, and `Date: ____`. It also supports repeated underscore/CID glyph lines, multiple fields on the same row, and long labels below a line such as an approved commitment amount. The detector filters likely underlined headings, normal text tables, and fields that would cover existing dark printed content. It writes both the fillable PDF and an editable CSV; review the CSV before production use because flat PDFs can contain font-encoded labels that cannot always be decoded reliably.
+
 Convert field names in a PDF using the default Plan-T code file:
 
 ```powershell

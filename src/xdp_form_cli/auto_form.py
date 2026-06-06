@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import csv
 import decimal
+import html
 import re
+import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,10 +35,17 @@ import pikepdf
 from pikepdf import Name
 
 from xdp_form_cli.acroform_builder import create_acroform_pdf
+from xdp_form_cli.field_validation import ParsedField, _validate_original_content_overlap
 from xdp_form_cli.xfa_stripper import pdf_has_xfa, strip_xfa
 
 
 # Words that mark a box as a signature (image) field, in English and Hebrew.
+HEBREW_SIGNATURE_KEYWORDS = ("חתום", "חתימה", "חתימת", "חותם", "החתום")
+BBOX_WORD_RE = re.compile(
+    r'<word\s+xMin="(?P<x0>[-0-9.]+)"\s+yMin="(?P<y0>[-0-9.]+)"\s+'
+    r'xMax="(?P<x1>[-0-9.]+)"\s+yMax="(?P<y1>[-0-9.]+)">(?P<text>.*?)</word>'
+)
+BBOX_PAGE_RE = re.compile(r'<page\b[^>]*\bheight="(?P<height>[-0-9.]+)"')
 SIGNATURE_KEYWORDS = ("signature", "sign here", "sign", "חתימה")
 
 # Box-size gates (PDF points) for what counts as a fillable input rectangle.
@@ -47,10 +57,15 @@ MAX_BOX_HEIGHT_PT = 120.0
 # below any printed label. Must match the /Arial 10 Tf default in acroform_builder.
 FIELD_FONT_SIZE_PT = 10.0
 MAX_FIELD_HEIGHT_PT = 2 * FIELD_FONT_SIZE_PT
+UNDERLINE_FIELD_HEIGHT_PT = 12.0
 
 # Checkbox size gates (PDF points): small, approximately square rectangles.
 MIN_CHECKBOX_PT = 6.0
 MAX_CHECKBOX_PT = 20.0
+VISUAL_CHECKBOX_GLYPHS = {"□", "☐", "▢", "◻", "▫", "☑", "☒"}
+VISUAL_CHECKBOX_MIN_PT = 10.0
+VISUAL_CHECKBOX_MAX_PT = 20.0
+CHECKBOX_GLYPHS = ("\x00\x86", "\x86", "☐", "□", "☑", "☒")
 
 # Cap on a downloaded PDF to avoid pulling an unbounded response into memory.
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
@@ -61,6 +76,17 @@ class TextAnchor:
     text: str
     x: float
     y: float
+
+
+@dataclass(frozen=True)
+class BBoxWord:
+    page: int
+    page_height: float
+    text: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
 
 
 @dataclass(frozen=True)
@@ -83,6 +109,12 @@ class AutoFieldSpec:
     h: float
 
 
+@dataclass(frozen=True)
+class AutoClientFormSummary:
+    type_counts: dict[str, int]
+    warnings: tuple[str, ...] = ()
+
+
 def build_auto_form(
     source: str | Path,
     output_path: str | Path,
@@ -94,6 +126,33 @@ def build_auto_form(
 
     Returns ``(output_pdf, fields_csv, field_count)``.
     """
+    output, csv_out, specs = _build_detected_form(
+        source,
+        output_path,
+        csv_path=csv_path,
+        xfa_template_path=xfa_template_path,
+    )
+    return output, csv_out, len(specs)
+
+
+def build_auto_client_form(
+    source: str | Path,
+    output_path: str | Path,
+    *,
+    csv_path: str | Path | None = None,
+) -> tuple[Path, Path, int, AutoClientFormSummary]:
+    """Build a client-upload fillable AcroForm and return a detection summary."""
+    output, csv_out, specs = _build_detected_form(source, output_path, csv_path=csv_path)
+    return output, csv_out, len(specs), _summarize_specs(specs)
+
+
+def _build_detected_form(
+    source: str | Path,
+    output_path: str | Path,
+    *,
+    csv_path: str | Path | None,
+    xfa_template_path: str | Path | None = None,
+) -> tuple[Path, Path, list[AutoFieldSpec]]:
     output = Path(output_path)
     csv_out = Path(csv_path) if csv_path else output.with_suffix(".fields.csv")
 
@@ -135,13 +194,23 @@ def build_auto_form(
         else:
             create_acroform_pdf(stripped, csv_out, output)
 
-    return output, csv_out, len(specs)
+    return output, csv_out, specs
+
+
+def _summarize_specs(specs: list[AutoFieldSpec]) -> AutoClientFormSummary:
+    counts: dict[str, int] = {}
+    for spec in specs:
+        counts[spec.field_type] = counts.get(spec.field_type, 0) + 1
+    return AutoClientFormSummary(type_counts=dict(sorted(counts.items())))
 
 
 def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
     """Detect input boxes on every page and turn them into field specs."""
     specs: list[AutoFieldSpec] = []
     used_names: dict[str, int] = {}
+    bbox_xml = _read_bbox_xml(pdf_path)
+    bbox_underline_boxes = _bbox_underline_boxes_from_xml(bbox_xml) if bbox_xml else {}
+    bbox_checkbox_boxes = _bbox_checkbox_boxes_from_xml(bbox_xml) if bbox_xml else {}
 
     with pikepdf.Pdf.open(str(pdf_path)) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
@@ -151,22 +220,45 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
                 b for b in _detect_underline_boxes(page, page_index)
                 if not _overlaps_any(b, geo_boxes)
             ]
+            underline_boxes.extend(
+                b for b in bbox_underline_boxes.get(page_index, [])
+                if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
+            )
             checkbox_boxes = [
                 b for b in _detect_checkbox_boxes(page, page_index)
                 if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
             ]
-            # Filter geo_boxes to exclude ones that contain text.
-            geo_boxes = [b for b in geo_boxes if not _box_contains_text(b, anchors)]
+            glyph_checkbox_boxes = [
+                b for b in _detect_glyph_checkbox_boxes(page, page_index)
+                if (
+                    not _overlaps_any(b, geo_boxes)
+                    and not _overlaps_any(b, underline_boxes)
+                    and not _overlaps_any(b, checkbox_boxes)
+                )
+            ]
+            checkbox_boxes.extend(glyph_checkbox_boxes)
+            checkbox_boxes.extend(
+                b for b in bbox_checkbox_boxes.get(page_index, [])
+                if (
+                    not _overlaps_any(b, geo_boxes)
+                    and not _overlaps_any(b, underline_boxes)
+                    and not _overlaps_any(b, checkbox_boxes)
+                )
+            )
             # Checkboxes are typed directly; text/image boxes go through label analysis.
             for box in checkbox_boxes:
                 label = _nearest_label(box, anchors)
-                base = _field_base_name(label, is_signature=False)
+                base = _checkbox_base_name(label)
                 name = _unique_name(base, used_names)
                 specs.append(AutoFieldSpec(
                     page=box.page, name=name, field_type="checkbox",
                     x=round(box.x, 2), y=round(box.y, 2),
                     w=round(box.w, 2), h=round(box.h, 2),
                 ))
+            geo_boxes = _filter_fillable_text_boxes(geo_boxes, anchors)
+            # Underscore runs are themselves a strong fillable-field signal
+            # (for example: "Name ______, Number").  Keep them separate from
+            # drawn table separators, which are filtered above.
             boxes = geo_boxes + underline_boxes
             for box in boxes:
                 label = _nearest_label(box, anchors)
@@ -186,7 +278,127 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
                         h=round(h, 2),
                     )
                 )
-    return specs
+    specs = _filter_specs_by_original_content(pdf_path, specs)
+    return _apply_signature_context_rows(specs, _signature_contexts_from_pdf_text(pdf_path))
+
+
+def _filter_specs_by_original_content(pdf_path: str | Path, specs: list[AutoFieldSpec]) -> list[AutoFieldSpec]:
+    parsed = [
+        ParsedField(
+            page=spec.page,
+            name=spec.name,
+            field_type=spec.field_type,
+            x=spec.x,
+            y=spec.y,
+            w=spec.w,
+            h=spec.h,
+        )
+        for spec in specs
+    ]
+    issues = _validate_original_content_overlap(pdf_path, parsed)
+    blocked = {
+        (issue.page, issue.field)
+        for issue in issues
+        if issue.code == "field-over-original-content" and issue.page is not None and issue.field
+    }
+    if not blocked:
+        return specs
+    return [spec for spec in specs if (spec.page, spec.name) not in blocked]
+
+
+def _signature_contexts_from_pdf_text(pdf_path: str | Path) -> list[tuple[int, float]]:
+    if shutil.which("pdftotext") is None:
+        return []
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        bbox_path = Path(temp_dir) / "bbox.html"
+        command = [
+            "pdftotext",
+            "-bbox-layout",
+            "-enc",
+            "UTF-8",
+            str(pdf_path),
+            str(bbox_path),
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError):
+            return []
+
+        contexts: list[tuple[int, float]] = []
+        page_number = 0
+        page_height = 0.0
+        for line in bbox_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            page_match = BBOX_PAGE_RE.search(line)
+            if page_match:
+                page_number += 1
+                page_height = float(page_match.group("height"))
+                continue
+
+            word_match = BBOX_WORD_RE.search(line)
+            if page_number < 1 or page_height <= 0 or word_match is None:
+                continue
+            word = html.unescape(word_match.group("text"))
+            if not _matches_signature_context_word(word):
+                continue
+            y_pdf = page_height - float(word_match.group("y1"))
+            contexts.append((page_number, y_pdf))
+        return contexts
+
+
+def _matches_signature_context_word(word: str) -> bool:
+    cleaned = re.sub(r"[^\w\u0590-\u05FF]+", "", word).casefold()
+    if not cleaned:
+        return False
+    reversed_cleaned = cleaned[::-1]
+    if any(keyword in cleaned for keyword in SIGNATURE_KEYWORDS):
+        return True
+    return any(keyword in cleaned or keyword in reversed_cleaned for keyword in HEBREW_SIGNATURE_KEYWORDS)
+
+
+def _apply_signature_context_rows(
+    specs: list[AutoFieldSpec],
+    contexts: list[tuple[int, float]],
+) -> list[AutoFieldSpec]:
+    if not contexts:
+        return specs
+
+    signature_targets: set[tuple[int, float]] = set()
+    for page, context_y in contexts:
+        candidates = [
+            spec for spec in specs
+            if (
+                spec.page == page
+                and spec.field_type == "text"
+                and spec.y < context_y
+                and context_y - spec.y <= 140
+                and spec.w >= 70
+            )
+        ]
+        if not candidates:
+            continue
+        closest_y = max(spec.y for spec in candidates)
+        row = [spec for spec in candidates if abs(spec.y - closest_y) <= 3]
+        if len(row) < 2:
+            continue
+        for spec in row:
+            signature_targets.add((spec.page, spec.y))
+
+    updated: list[AutoFieldSpec] = []
+    for spec in specs:
+        if (spec.page, spec.y) in signature_targets and spec.field_type == "text":
+            updated.append(AutoFieldSpec(
+                page=spec.page,
+                name=spec.name.replace("txt", "img", 1) if spec.name.startswith("txt") else f"img{spec.name}",
+                field_type="image",
+                x=spec.x,
+                y=spec.y,
+                w=spec.w,
+                h=spec.h,
+            ))
+        else:
+            updated.append(spec)
+    return updated
 
 
 def write_field_csv(specs: list[AutoFieldSpec], csv_path: str | Path) -> Path:
@@ -227,6 +439,195 @@ def _download_pdf(url: str, dest: Path) -> Path:
     return dest
 
 
+def _detect_bbox_underline_boxes(pdf_path: str | Path) -> dict[int, list[DetectedBox]]:
+    """Use Poppler's visual word boxes as a fallback for RTL/custom-font underlines."""
+    xml_text = _read_bbox_xml(pdf_path)
+    if not xml_text:
+        return {}
+    return _bbox_underline_boxes_from_xml(xml_text)
+
+
+def _detect_bbox_checkbox_boxes(pdf_path: str | Path) -> dict[int, list[DetectedBox]]:
+    """Use Poppler visual word boxes to find checkbox glyphs near text labels."""
+    xml_text = _read_bbox_xml(pdf_path)
+    if not xml_text:
+        return {}
+    return _bbox_checkbox_boxes_from_xml(xml_text)
+
+
+def _read_bbox_xml(pdf_path: str | Path) -> str:
+    if shutil.which("pdftotext") is None:
+        return ""
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        bbox_path = Path(temp_dir) / "bbox.xml"
+        command = [
+            "pdftotext",
+            "-bbox-layout",
+            "-enc",
+            "UTF-8",
+            str(pdf_path),
+            str(bbox_path),
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError):
+            return ""
+        if not bbox_path.exists():
+            return ""
+        return bbox_path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _bbox_underline_boxes_from_xml(xml_text: str) -> dict[int, list[DetectedBox]]:
+    words_by_page = _bbox_words_by_page_from_xml(xml_text)
+
+    boxes_by_page: dict[int, list[DetectedBox]] = {}
+    for page, words in words_by_page.items():
+        boxes: list[DetectedBox] = []
+        for word in words:
+            box = _bbox_word_underline_box(word)
+            if box is None:
+                continue
+            if not _bbox_has_fillable_context(word, box, words):
+                continue
+            if not _overlaps_any(box, boxes):
+                boxes.append(box)
+        if boxes:
+            boxes_by_page[page] = sorted(boxes, key=lambda b: (-b.y, b.x))
+    return boxes_by_page
+
+
+def _bbox_checkbox_boxes_from_xml(xml_text: str) -> dict[int, list[DetectedBox]]:
+    words_by_page = _bbox_words_by_page_from_xml(xml_text)
+
+    boxes_by_page: dict[int, list[DetectedBox]] = {}
+    for page, words in words_by_page.items():
+        boxes: list[DetectedBox] = []
+        for word in words:
+            box = _bbox_word_checkbox_box(word)
+            if box is None:
+                continue
+            if not _bbox_has_label_context(word, words):
+                continue
+            if not _overlaps_any(box, boxes):
+                boxes.append(box)
+        if boxes:
+            boxes_by_page[page] = sorted(boxes, key=lambda b: (-b.y, b.x))
+    return boxes_by_page
+
+
+def _bbox_words_by_page_from_xml(xml_text: str) -> dict[int, list[BBoxWord]]:
+    words_by_page: dict[int, list[BBoxWord]] = {}
+    current_page = 0
+    current_height = 0.0
+
+    for line in xml_text.splitlines():
+        page_match = BBOX_PAGE_RE.search(line)
+        if page_match:
+            current_page += 1
+            current_height = float(page_match.group("height"))
+            words_by_page.setdefault(current_page, [])
+            continue
+
+        word_match = BBOX_WORD_RE.search(line)
+        if not word_match or current_page == 0:
+            continue
+        words_by_page.setdefault(current_page, []).append(
+            BBoxWord(
+                page=current_page,
+                page_height=current_height,
+                text=html.unescape(word_match.group("text")),
+                x0=float(word_match.group("x0")),
+                y0=float(word_match.group("y0")),
+                x1=float(word_match.group("x1")),
+                y1=float(word_match.group("y1")),
+            )
+        )
+    return words_by_page
+
+
+def _bbox_word_checkbox_box(word: BBoxWord) -> DetectedBox | None:
+    if word.text.strip() not in VISUAL_CHECKBOX_GLYPHS:
+        return None
+    width = word.x1 - word.x0
+    height = word.y1 - word.y0
+    if not (VISUAL_CHECKBOX_MIN_PT <= width <= VISUAL_CHECKBOX_MAX_PT):
+        return None
+    if not (VISUAL_CHECKBOX_MIN_PT <= height <= VISUAL_CHECKBOX_MAX_PT):
+        return None
+    if abs(width - height) / max(width, height) > 0.35:
+        return None
+    return DetectedBox(
+        page=word.page,
+        x=round(word.x0, 1),
+        y=round(word.page_height - word.y1, 1),
+        w=round(width, 1),
+        h=round(height, 1),
+    )
+
+
+def _bbox_word_underline_box(word: BBoxWord) -> DetectedBox | None:
+    matches = list(re.finditer(r"_+", word.text))
+    if not matches:
+        return None
+    match = max(matches, key=lambda item: item.end() - item.start())
+    underline_len = match.end() - match.start()
+    if underline_len < 8:
+        return None
+
+    text_len = max(len(word.text), 1)
+    char_w = (word.x1 - word.x0) / text_len
+    field_x = word.x0 + match.start() * char_w
+    field_w = underline_len * char_w
+    if field_w < MIN_BOX_WIDTH_PT:
+        return None
+
+    return DetectedBox(
+        page=word.page,
+        x=round(field_x, 1),
+        y=round(word.page_height - word.y1, 1),
+        w=round(field_w, 1),
+        h=UNDERLINE_FIELD_HEIGHT_PT,
+    )
+
+
+def _bbox_has_fillable_context(source: BBoxWord, box: DetectedBox, words: list[BBoxWord]) -> bool:
+    source_context = re.sub(r"_+", "", source.text)
+    if _effective_text_len(source_context) > 0:
+        return True
+
+    for word in words:
+        if word is source or "_" in word.text:
+            continue
+        if _effective_text_len(word.text) == 0:
+            continue
+        if not _bbox_words_share_line(source, word):
+            continue
+        gap = max(box.x - word.x1, word.x0 - (box.x + box.w), 0)
+        if gap <= 220:
+            return True
+    return False
+
+
+def _bbox_has_label_context(source: BBoxWord, words: list[BBoxWord]) -> bool:
+    for word in words:
+        if word is source or word.text.strip() in VISUAL_CHECKBOX_GLYPHS:
+            continue
+        if _effective_text_len(word.text) == 0:
+            continue
+        if not _bbox_words_share_line(source, word):
+            continue
+        gap = max(source.x0 - word.x1, word.x0 - source.x1, 0)
+        if gap <= 260:
+            return True
+    return False
+
+
+def _bbox_words_share_line(a: BBoxWord, b: BBoxWord) -> bool:
+    vertical_overlap = min(a.y1, b.y1) - max(a.y0, b.y0)
+    return vertical_overlap >= min(a.y1 - a.y0, b.y1 - b.y0) * 0.5
+
+
 def _detect_underline_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
     """Detect fields rendered as underscore-character runs in TJ/Tj operators.
 
@@ -236,19 +637,9 @@ def _detect_underline_boxes(page: pikepdf.Page, page_index: int) -> list[Detecte
     advance from the embedded font (Widths array), falling back to 0.556em.
     Td/TD offsets are scaled by the Tm scale factor for correct page coordinates.
     """
-    # Pre-build a {font_resource_name: underscore_advance_in_em} lookup.
-    underscore_advance_em: dict[str, float] = {}
-    res = page.resources
-    if "/Font" in res:
-        for fname, fobj in res["/Font"].items():
-            try:
-                first_char = int(fobj.get("/FirstChar", 0))
-                widths = fobj.get("/Widths", [])
-                idx = 95 - first_char  # ASCII '_'
-                if 0 <= idx < len(widths):
-                    underscore_advance_em[str(fname)] = float(widths[idx]) / 1000.0
-            except Exception:
-                pass
+    # Pre-build font metrics.  Some Hebrew PDFs encode visual underlines as a
+    # repeated CID glyph rather than the ASCII "_" character.
+    font_metrics = _font_metrics(page)
 
     boxes: list[DetectedBox] = []
     tm_a = tm_d = 1.0
@@ -283,29 +674,135 @@ def _detect_underline_boxes(page: pikepdf.Page, page_index: int) -> list[Detecte
             page_ty += float(token.operands[1]) * tm_d
         elif op in ("TJ", "Tj"):
             txt = _decode_text_op(token)
-            if "_" not in txt:
-                continue
             # Exact glyph advance from font Widths, fallback to 0.556 em (Arial standard).
-            adv_em = underscore_advance_em.get(tf_name or "", 0.556)
+            widths, default_advance_em = font_metrics.get(tf_name or "", ({}, 0.556))
+            adv_em = widths.get(95, default_advance_em)
             char_w = adv_em * tf_size * abs(tm_a)
-            if char_w <= 0:
+            if char_w > 0 and "_" in txt:
+                for match in re.finditer(r"_+", txt):
+                    under_idx = match.start()
+                    n_under = match.end() - under_idx
+                    if n_under < 10:  # skip short decorative underscores
+                        continue
+                    if txt[:under_idx].strip() == ".":
+                        continue
+                    field_x = page_tx + under_idx * char_w
+                    field_w = n_under * char_w
+                    if field_w < MIN_BOX_WIDTH_PT:
+                        continue
+                    boxes.append(DetectedBox(page_index, round(field_x, 1), round(page_ty, 1),
+                                             round(field_w, 1), UNDERLINE_FIELD_HEIGHT_PT))
+            raw = _raw_text_op_bytes(token)
+            units = _cid_units(raw)
+            if not units:
                 continue
-            # Find the longest consecutive run of underscores.
-            under_idx = txt.index("_")
-            run_end = under_idx
-            while run_end < len(txt) and txt[run_end] == "_":
-                run_end += 1
-            n_under = run_end - under_idx
-            if n_under < 10:  # skip short decorative underscores
-                continue
-            field_x = page_tx + under_idx * char_w
-            field_w = n_under * char_w
-            if field_w < MIN_BOX_WIDTH_PT:
-                continue
-            boxes.append(DetectedBox(page_index, round(field_x, 1), round(page_ty, 1),
-                                     round(field_w, 1), MAX_FIELD_HEIGHT_PT))
+            for start, length in _repeated_cid_runs(units):
+                if _cid_prefix_is_dot(units, start):
+                    continue
+                field_x = page_tx + _units_advance_em(units[:start], widths, default_advance_em) * tf_size * abs(tm_a)
+                field_w = _units_advance_em(units[start:start + length], widths, default_advance_em) * tf_size * abs(tm_a)
+                if field_w < MIN_BOX_WIDTH_PT:
+                    continue
+                boxes.append(DetectedBox(page_index, round(field_x, 1), round(page_ty, 1),
+                                         round(field_w, 1), UNDERLINE_FIELD_HEIGHT_PT))
 
     return boxes
+
+
+def _font_metrics(page: pikepdf.Page) -> dict[str, tuple[dict[int, float], float]]:
+    metrics: dict[str, tuple[dict[int, float], float]] = {}
+    res = page.resources
+    if "/Font" not in res:
+        return metrics
+
+    for fname, fobj in res["/Font"].items():
+        widths: dict[int, float] = {}
+        default_advance_em = 0.556
+        try:
+            first_char = int(fobj.get("/FirstChar", 0))
+            for offset, width in enumerate(fobj.get("/Widths", [])):
+                widths[first_char + offset] = float(width) / 1000.0
+        except Exception:
+            pass
+
+        try:
+            if "/DescendantFonts" in fobj:
+                descendant = fobj["/DescendantFonts"][0]
+                default_advance_em = float(descendant.get("/DW", 1000)) / 1000.0
+                _add_cid_widths(widths, descendant.get("/W", []))
+        except Exception:
+            pass
+
+        metrics[str(fname)] = (widths, default_advance_em)
+    return metrics
+
+
+def _add_cid_widths(widths: dict[int, float], width_array) -> None:
+    i = 0
+    while i < len(width_array):
+        first = int(width_array[i])
+        second = width_array[i + 1]
+        if isinstance(second, pikepdf.Array):
+            for offset, width in enumerate(second):
+                widths[first + offset] = float(width) / 1000.0
+            i += 2
+        else:
+            last = int(second)
+            width = float(width_array[i + 2]) / 1000.0
+            for code in range(first, last + 1):
+                widths[code] = width
+            i += 3
+
+
+def _raw_text_op_bytes(token) -> bytes:
+    op = str(token.operator)
+    if op == "Tj":
+        try:
+            return bytes(token.operands[0])
+        except Exception:
+            return b""
+
+    chunks: list[bytes] = []
+    for item in token.operands[0]:
+        if isinstance(item, (int, float, decimal.Decimal)):
+            continue
+        try:
+            chunks.append(bytes(item))
+        except Exception:
+            pass
+    return b"".join(chunks)
+
+
+def _cid_units(raw: bytes) -> list[int] | None:
+    if len(raw) < 20 or len(raw) % 2:
+        return None
+    units = [int.from_bytes(raw[index:index + 2], "big") for index in range(0, len(raw), 2)]
+    zero_high_bytes = sum(1 for index in range(0, len(raw), 2) if raw[index] == 0)
+    if zero_high_bytes / len(units) < 0.5:
+        return None
+    return units
+
+
+def _repeated_cid_runs(units: list[int]) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    start = 0
+    while start < len(units):
+        end = start + 1
+        while end < len(units) and units[end] == units[start]:
+            end += 1
+        if end - start >= 10 and units[start] not in (0, 32):
+            runs.append((start, end - start))
+        start = end
+    return runs
+
+
+def _cid_prefix_is_dot(units: list[int], run_start: int) -> bool:
+    meaningful = [unit for unit in units[:run_start] if unit not in (0, 32)]
+    return meaningful == [ord(".")]
+
+
+def _units_advance_em(units: list[int], widths: dict[int, float], default_advance_em: float) -> float:
+    return sum(widths.get(unit, default_advance_em) for unit in units)
 
 
 def _decode_text_op(token) -> str:
@@ -344,6 +841,7 @@ def _detect_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[Detected
     pending: list[tuple[float, float, float, float]] = []
     clip_pending: list[tuple[float, float, float, float]] = []
     last_clip_rects: list[tuple[float, float, float, float]] = []
+    current_path: list[tuple[float, float]] = []
 
     for token in pikepdf.parse_content_stream(page):
         op = str(token.operator)
@@ -360,6 +858,26 @@ def _detect_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[Detected
                     and abs(w - h) / max(w, h) < 0.3):
                 pending.append((round(x, 1), round(y, 1), round(w, 1), round(h, 1)))
 
+        elif op == "m" and len(token.operands) == 2:
+            try:
+                x, y = (float(v) for v in token.operands)
+            except (TypeError, ValueError):
+                current_path = []
+                continue
+            current_path = [(x, y)]
+        elif op == "l" and len(token.operands) == 2:
+            if not current_path:
+                continue
+            try:
+                x, y = (float(v) for v in token.operands)
+            except (TypeError, ValueError):
+                current_path = []
+                continue
+            current_path.append((x, y))
+        elif op == "h":
+            # The stroke/fill operator will consume the path. Keeping the
+            # points is enough; the close-path segment is implicit.
+            pass
         elif op == "Do":
             for r in last_clip_rects:
                 if r in checkboxes:
@@ -367,21 +885,100 @@ def _detect_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[Detected
             last_clip_rects.clear()
 
         elif op in ("S", "s", "f", "F", "f*", "B", "B*", "b", "b*"):
+            line_box = _line_path_checkbox(current_path)
+            if line_box is not None:
+                pending.append(line_box)
             checkboxes.extend(pending)
             pending.clear()
             clip_pending.clear()
             last_clip_rects.clear()
+            current_path = []
         elif op in ("W", "W*"):
             clip_pending = list(pending)
             pending.clear()
+            current_path = []
         elif op == "n":
             checkboxes.extend(clip_pending)
             last_clip_rects = list(clip_pending)
             clip_pending.clear()
             pending.clear()
+            current_path = []
 
     unique = sorted(set(checkboxes), key=lambda r: (-r[1], r[0]))
     return [DetectedBox(page_index, x, y, w, h) for (x, y, w, h) in unique]
+
+
+def _detect_glyph_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
+    """Detect checkboxes rendered as a font glyph rather than vector paths."""
+    boxes: list[DetectedBox] = []
+    tm_a = tm_d = 1.0
+    page_tx = page_ty = 0.0
+    tf_size = 10.0
+
+    for token in pikepdf.parse_content_stream(page):
+        op = str(token.operator)
+
+        if op == "BT":
+            tm_a = tm_d = 1.0
+            page_tx = page_ty = 0.0
+            tf_size = 10.0
+        elif op == "Tf":
+            try:
+                tf_size = float(token.operands[1])
+            except (TypeError, ValueError, IndexError):
+                pass
+        elif op == "Tm" and len(token.operands) == 6:
+            tm_a = float(token.operands[0])
+            tm_d = float(token.operands[3])
+            page_tx = float(token.operands[4])
+            page_ty = float(token.operands[5])
+        elif op in ("Td", "TD") and len(token.operands) == 2:
+            page_tx += float(token.operands[0]) * tm_a
+            page_ty += float(token.operands[1]) * tm_d
+        elif op in ("TJ", "Tj"):
+            text = _decode_text_op(token)
+            if not any(glyph in text for glyph in CHECKBOX_GLYPHS):
+                continue
+            size = abs(tm_d) * tf_size
+            if not (MIN_CHECKBOX_PT <= size <= MAX_CHECKBOX_PT):
+                size = max(MIN_CHECKBOX_PT, min(MAX_CHECKBOX_PT, size))
+            boxes.append(
+                DetectedBox(
+                    page_index,
+                    round(page_tx, 1),
+                    round(page_ty, 1),
+                    round(size, 1),
+                    round(size, 1),
+                )
+            )
+
+    return boxes
+
+
+def _line_path_checkbox(points: list[tuple[float, float]]) -> tuple[float, float, float, float] | None:
+    if len(points) < 4:
+        return None
+    xs = [x for x, _ in points]
+    ys = [y for _, y in points]
+    x = min(xs)
+    y = min(ys)
+    w = max(xs) - x
+    h = max(ys) - y
+    if not (MIN_CHECKBOX_PT <= w <= MAX_CHECKBOX_PT and MIN_CHECKBOX_PT <= h <= MAX_CHECKBOX_PT):
+        return None
+    if abs(w - h) / max(w, h) >= 0.3:
+        return None
+
+    corners = {
+        (round(x, 1), round(y, 1)),
+        (round(x + w, 1), round(y, 1)),
+        (round(x + w, 1), round(y + h, 1)),
+        (round(x, 1), round(y + h, 1)),
+    }
+    actual = {(round(px, 1), round(py, 1)) for px, py in points}
+    if not corners.issubset(actual):
+        return None
+    return (round(x, 1), round(y, 1), round(w, 1), round(h, 1))
 
 
 def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
@@ -391,6 +988,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
     underline_pending: list[tuple[float, float, float, float]] = []
     clip_pending: list[tuple[float, float, float, float]] = []
     last_clip_rects: list[tuple[float, float, float, float]] = []
+    current_path: list[tuple[float, float]] = []
     fill_is_white = False  # PDF default fill colour is black
 
     for token in pikepdf.parse_content_stream(page):
@@ -417,6 +1015,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
 
         elif op == "re":
             last_clip_rects.clear()
+            current_path = []
             try:
                 x, y, w, h = (float(v) for v in token.operands)
             except (TypeError, ValueError):
@@ -432,6 +1031,25 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
                     # Thin rect — candidate for a standalone underline field.
                     underline_pending.append((round(x, 1), round(y, 1), round(w, 1)))
 
+        elif op == "m" and len(token.operands) == 2:
+            try:
+                x, y = (float(v) for v in token.operands)
+            except (TypeError, ValueError):
+                current_path = []
+                continue
+            current_path = [(x, y)]
+        elif op == "l" and len(token.operands) == 2:
+            if not current_path:
+                continue
+            try:
+                x, y = (float(v) for v in token.operands)
+            except (TypeError, ValueError):
+                current_path = []
+                continue
+            current_path.append((x, y))
+        elif op == "h":
+            pass
+
         elif op == "Do":
             # Image XObject rendered inside a clip path — discard the clip rects
             # that were just accepted, since this is a logo/image area, not a field.
@@ -442,10 +1060,15 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
 
         elif op in ("S", "s"):
             # Stroke only — always an input border, no fill involved.
+            line = _line_path_underline(current_path)
+            if line is not None:
+                underline_candidates.append(line)
+            current_path = []
             clip_rects.extend(pending)
             pending.clear()
             clip_pending.clear()
             last_clip_rects.clear()
+            current_path = []
             underline_candidates.extend(underline_pending)
             underline_pending.clear()
         elif op in ("f", "F", "f*"):
@@ -455,6 +1078,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             pending.clear()
             clip_pending.clear()
             last_clip_rects.clear()
+            current_path = []
             underline_candidates.extend(underline_pending)
             underline_pending.clear()
         elif op in ("B", "B*", "b", "b*"):
@@ -464,6 +1088,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             pending.clear()
             clip_pending.clear()
             last_clip_rects.clear()
+            current_path = []
             underline_candidates.extend(underline_pending)
             underline_pending.clear()
         elif op in ("W", "W*"):
@@ -471,6 +1096,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             clip_pending = list(pending)
             pending.clear()
             underline_pending.clear()
+            current_path = []
         elif op == "n":
             # End path without fill/stroke. If preceded by W/W* this is a clip-only
             # area (re W n), which XFA uses for every rendered field — treat as input.
@@ -478,6 +1104,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             last_clip_rects = list(clip_pending)
             clip_pending.clear()
             pending.clear()
+            current_path = []
 
     # Keep only underlines that don't overlap with an existing clip-path field.
     standalone_underlines: list[tuple[float, float, float, float]] = []
@@ -488,20 +1115,35 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             for cx, cy, cw, ch in clip_rects
         )
         if not covered:
-            standalone_underlines.append((ux, uy, uw, MAX_FIELD_HEIGHT_PT))
+            standalone_underlines.append((ux, uy, uw, UNDERLINE_FIELD_HEIGHT_PT))
 
     all_rects = clip_rects + standalone_underlines
     unique = sorted(set(all_rects), key=lambda r: (-r[1], r[0]))
     return [DetectedBox(page_index, x, y, w, h) for (x, y, w, h) in unique]
 
 
+def _line_path_underline(points: list[tuple[float, float]]) -> tuple[float, float, float] | None:
+    if len(points) != 2:
+        return None
+    (x1, y1), (x2, y2) = points
+    if abs(y1 - y2) > 1:
+        return None
+    x = min(x1, x2)
+    w = abs(x2 - x1)
+    if w < MIN_BOX_WIDTH_PT:
+        return None
+    return (round(x, 1), round((y1 + y2) / 2, 1), round(w, 1))
+
+
 def _extract_text_anchors(page: pikepdf.Page) -> list[TextAnchor]:
     anchors: list[TextAnchor] = []
+    tm_a = tm_d = 1.0
     tx = ty = 0.0
     for token in pikepdf.parse_content_stream(page):
         op = str(token.operator)
         if op == "BT":
             # Text matrix resets to the identity at the start of each text object.
+            tm_a = tm_d = 1.0
             tx = ty = 0.0
         elif op in ("Tm", "Td", "TD"):
             try:
@@ -509,19 +1151,25 @@ def _extract_text_anchors(page: pikepdf.Page) -> list[TextAnchor]:
             except (TypeError, ValueError):
                 continue
             if op == "Tm" and len(values) == 6:
+                tm_a = values[0]
+                tm_d = values[3]
                 tx, ty = values[4], values[5]
             elif len(values) == 2:
-                tx += values[0]
-                ty += values[1]
+                tx += values[0] * tm_a
+                ty += values[1] * tm_d
         elif op == "Tj" and token.operands:
+            if _text_op_is_fill_line_anchor(token):
+                continue
             text = _operand_text(token.operands[0])
             if text.strip():
                 anchors.append(TextAnchor(text.strip(), tx, ty))
         elif op == "TJ" and token.operands:
+            if _text_op_is_fill_line_anchor(token):
+                continue
             parts = [
                 _operand_text(item)
                 for item in token.operands[0]
-                if not isinstance(item, (int, float))
+                if not isinstance(item, (int, float, decimal.Decimal))
             ]
             text = "".join(parts).strip()
             if text:
@@ -536,6 +1184,19 @@ def _operand_text(operand) -> str:
         return str(operand)
 
 
+def _text_op_is_fill_line_anchor(token) -> bool:
+    text = _decode_text_op(token)
+    longest_underscore = max((len(match.group(0)) for match in re.finditer(r"_+", text)), default=0)
+    if longest_underscore >= 10 and longest_underscore / max(len(text), 1) >= 0.45:
+        return True
+
+    units = _cid_units(_raw_text_op_bytes(token))
+    if not units:
+        return False
+    longest_cid_run = max((length for _, length in _repeated_cid_runs(units)), default=0)
+    return longest_cid_run >= 10 and longest_cid_run / len(units) >= 0.45
+
+
 def _box_contains_text(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
     """Return True if the box contains or overlaps with text anchors."""
     for anchor in anchors:
@@ -544,12 +1205,149 @@ def _box_contains_text(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
     return False
 
 
+def _is_fillable_text_box(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
+    """Return True when a text/image candidate looks like a blank fill area.
+
+    Underlined headings and table row separators can look like input fields in
+    the PDF drawing operators. Require a nearby label before, after, or under
+    the blank area, and reject candidates with paragraph-like content directly
+    under the line.
+    """
+    if _has_conflicting_text_content(box, anchors):
+        return False
+    return _has_fillable_label_context(box, anchors)
+
+
+def _filter_fillable_text_boxes(
+    boxes: list[DetectedBox],
+    anchors: list[TextAnchor],
+) -> list[DetectedBox]:
+    direct = [box for box in boxes if _is_fillable_text_box(box, anchors)]
+    accepted = list(direct)
+
+    for box in boxes:
+        if box in direct or _has_conflicting_text_content(box, anchors):
+            continue
+        if _has_fillable_row_peer(box, direct, boxes, anchors):
+            accepted.append(box)
+
+    return accepted
+
+
+def _has_conflicting_text_content(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
+    for anchor in anchors:
+        if (
+            box.x + 2 <= anchor.x <= box.x + box.w - 2
+            and box.y + 2 <= anchor.y <= box.y + box.h - 2
+        ):
+            return True
+
+    below = _below_label_anchors(box, anchors)
+    return bool(below) and not _looks_like_short_below_label(below)
+
+
+def _has_fillable_label_context(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
+    adjacent = [
+        anchor for anchor in anchors
+        if (
+            _effective_text_len(anchor.text) > 0
+            and not _looks_like_section_number(anchor.text)
+            and box.y - 10 <= anchor.y <= box.y + _same_line_upper_gap(box)
+            and (
+                0 <= box.x - anchor.x <= 180
+                or 0 <= anchor.x - (box.x + box.w) <= 180
+            )
+        )
+    ]
+    if _looks_like_short_adjacent_label(adjacent):
+        return True
+
+    return _looks_like_short_below_label(_below_label_anchors(box, anchors))
+
+
+def _same_line_upper_gap(box: DetectedBox) -> float:
+    if box.h <= UNDERLINE_FIELD_HEIGHT_PT and box.w > 220:
+        return 8
+    return box.h + 12
+
+
+def _has_fillable_row_peer(
+    box: DetectedBox,
+    direct: list[DetectedBox],
+    all_boxes: list[DetectedBox],
+    anchors: list[TextAnchor],
+) -> bool:
+    if box.w > 220:
+        return False
+    row = [
+        other for other in all_boxes
+        if (
+            other.page == box.page
+            and abs(other.y - box.y) <= 2
+            and abs(other.h - box.h) <= 3
+            and other.w <= 220
+            and not _has_conflicting_text_content(other, anchors)
+        )
+    ]
+    if not (2 <= len(row) <= 3):
+        return False
+    return any(peer in direct and peer != box for peer in row)
+
+
+def _below_label_anchors(box: DetectedBox, anchors: list[TextAnchor]) -> list[TextAnchor]:
+    return [
+        anchor for anchor in anchors
+        if (
+            box.x - 10 <= anchor.x <= box.x + box.w + 10
+            and box.y - 28 <= anchor.y < box.y
+            and _effective_text_len(anchor.text) > 0
+        )
+    ]
+
+
+def _looks_like_short_below_label(anchors: list[TextAnchor]) -> bool:
+    label_anchors = [anchor for anchor in anchors if not _looks_like_section_number(anchor.text)]
+    if not label_anchors or len(label_anchors) > 3:
+        return False
+    if max(anchor.y for anchor in label_anchors) - min(anchor.y for anchor in label_anchors) > 5:
+        return False
+    total_len = sum(_effective_text_len(anchor.text) for anchor in label_anchors)
+    return 2 <= total_len <= 80
+
+
+def _looks_like_short_adjacent_label(anchors: list[TextAnchor]) -> bool:
+    label_anchors = [anchor for anchor in anchors if not _looks_like_section_number(anchor.text)]
+    if not label_anchors or len(label_anchors) > 3:
+        return False
+    if max(anchor.y for anchor in label_anchors) - min(anchor.y for anchor in label_anchors) > 5:
+        return False
+    total_len = sum(_effective_text_len(anchor.text) for anchor in label_anchors)
+    return 2 <= total_len <= 40
+
+
+def _looks_like_section_number(text: str) -> bool:
+    return re.fullmatch(r"\s*\d+(?:\.\d+)*\.?\s*", text) is not None
+
+
+def _effective_text_len(text: str) -> int:
+    return sum(1 for ch in text if ch.isalpha() or ch.isdigit())
+
+
 def _nearest_label(box: DetectedBox, anchors: list[TextAnchor]) -> str:
     box_cx = box.x + box.w / 2
     box_top = box.y + box.h
     best: str | None = None
     best_score = float("inf")
     for anchor in anchors:
+        if _effective_text_len(anchor.text) == 0:
+            continue
+        below_gap = box.y - anchor.y
+        if 0 < below_gap <= 28 and box.x - 10 <= anchor.x <= box.x + box.w + 10:
+            score = below_gap + abs(anchor.x - box_cx) * 0.1
+            if score < best_score:
+                best_score = score
+                best = anchor.text
+            continue
         # Prefer labels above or to the left of the box, close to it.
         dx = max(box.x - anchor.x, anchor.x - (box.x + box.w), 0)
         dy = anchor.y - box_top
@@ -578,9 +1376,12 @@ def _looks_like_text(label: str) -> bool:
     """
     letters = sum(ch.isalpha() for ch in label)
     digits = sum(ch.isdigit() for ch in label)
-    if letters < 3:
+    if letters < 2:
         return False
     if digits and digits / (letters + digits) > 0.2:
+        return False
+    alpha_chars = [ch.casefold() for ch in label if ch.isalpha()]
+    if alpha_chars and max(alpha_chars.count(ch) for ch in set(alpha_chars)) / len(alpha_chars) > 0.8:
         return False
     return True
 
@@ -593,6 +1394,15 @@ def _field_base_name(label: str, is_signature: bool) -> str:
     if not slug:
         return f"{prefix}Field"
     return f"{prefix}{slug[:32]}"
+
+
+def _checkbox_base_name(label: str) -> str:
+    if not _looks_like_text(label):
+        return "checkboxField"
+    slug = "".join(ch for ch in label.title() if ch.isalnum())
+    if not slug:
+        return "checkboxField"
+    return f"checkbox{slug[:32]}"
 
 
 def _unique_name(base: str, used_names: dict[str, int]) -> str:
