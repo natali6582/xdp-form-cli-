@@ -145,6 +145,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional LiveCycle-to-Plan-T mapping workbook, such as מיפוי שדות LiveCycle מול קוד המערכת.xlsx.",
     )
     auto_client_form_parser.add_argument(
+        "--semantic-field-map",
+        default=None,
+        help="Optional CSV with label,field_name columns for flat-PDF semantic mapping to Plan-T names.",
+    )
+    auto_client_form_parser.add_argument(
+        "--mapping-report",
+        default=None,
+        help="Optional CSV report showing detected labels, final names, and Plan-T match status.",
+    )
+    auto_client_form_parser.add_argument(
         "--azure-document-intelligence",
         action="store_true",
         help="Use Azure Document Intelligence prebuilt-layout as an optional OCR/layout fallback.",
@@ -401,6 +411,8 @@ def cmd_auto_client_form(args: argparse.Namespace) -> int:
         use_azure_document_intelligence=args.azure_document_intelligence,
         fields_list_path=args.fields_list,
         field_mapping_path=args.field_mapping_xlsx,
+        semantic_map_path=args.semantic_field_map,
+        mapping_report_path=args.mapping_report,
     )
     colors.success(f"Detected and placed {count} field(s).")
     colors.info(
@@ -411,6 +423,8 @@ def cmd_auto_client_form(args: argparse.Namespace) -> int:
         for warning in summary.warnings:
             colors.warn(warning)
     colors.success(f"Saved editable field CSV: {csv_path}")
+    if args.mapping_report:
+        colors.success(f"Saved field-name mapping report: {args.mapping_report}")
     colors.success(f"Saved fillable AcroForm PDF: {output}")
     colors.info("Review the CSV before production use; rerun create-acroform after manual corrections if needed.")
     return 0

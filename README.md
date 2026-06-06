@@ -175,6 +175,8 @@ xdp-form-cli auto-client-form --azure-document-intelligence --input "C:\path\upl
 
 `--fields-list` is the canonical allow-list of field names accepted by Plan-T.
 `--field-mapping-xlsx` adds safe direct aliases from existing LiveCycle names to Plan-T names.
+`--semantic-field-map` can point to a CSV with `label,field_name` columns for flat PDFs where there is no original field name to convert.
+`--mapping-report` writes a CSV showing each detected field, nearby label, final name, and whether it matched Plan-T.
 For flat PDFs with no original field names, only exact or unambiguous matches are renamed automatically; unmatched detected fields keep generated names and are reported in the command warnings so they can be mapped manually instead of silently filling the wrong system field.
 
 Convert field names in a PDF using the default Plan-T code file:

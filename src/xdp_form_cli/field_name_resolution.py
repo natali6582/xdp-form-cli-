@@ -30,12 +30,18 @@ class FieldNameResolver:
         known_names: set[str] | list[str],
         *,
         aliases: dict[str, str] | None = None,
+        label_aliases: dict[str, str] | None = None,
     ) -> None:
         self.known_names = sorted({name.strip() for name in known_names if name.strip()})
         self._casefold_to_known = {name.casefold(): name for name in self.known_names}
         self._aliases = {
             alias.casefold(): canonical
             for alias, canonical in (aliases or {}).items()
+            if alias.strip() and canonical.strip() and canonical.casefold() in self._casefold_to_known
+        }
+        self._label_aliases = {
+            _normalize_label(alias): canonical
+            for alias, canonical in (label_aliases or {}).items()
             if alias.strip() and canonical.strip() and canonical.casefold() in self._casefold_to_known
         }
 
@@ -45,15 +51,19 @@ class FieldNameResolver:
         *,
         fields_list_csv: str | Path | None = None,
         mapping_xlsx: str | Path | None = None,
+        semantic_map_csv: str | Path | None = None,
     ) -> "FieldNameResolver | None":
-        if fields_list_csv is None and mapping_xlsx is None:
+        if fields_list_csv is None and mapping_xlsx is None and semantic_map_csv is None:
             return None
 
         known_names = load_known_field_names(fields_list_csv) if fields_list_csv else set()
         aliases = load_livecycle_mapping_aliases(mapping_xlsx, known_names) if mapping_xlsx else {}
+        label_aliases = load_semantic_label_aliases(semantic_map_csv, known_names) if semantic_map_csv else {}
         if not known_names and aliases:
             known_names = set(aliases.values())
-        return cls(known_names, aliases=aliases)
+        if not known_names and label_aliases:
+            known_names = set(label_aliases.values())
+        return cls(known_names, aliases=aliases, label_aliases=label_aliases)
 
     def resolve(self, base_name: str, *, field_type: str, label: str = "") -> FieldNameResolution:
         prefix = _prefix_for_type(field_type)
@@ -65,6 +75,10 @@ class FieldNameResolver:
         alias = self._aliases.get(base_name.casefold())
         if alias and alias.startswith(prefix):
             return FieldNameResolution(alias, matched=True, method="livecycle-mapping")
+
+        label_alias = self._label_aliases.get(_normalize_label(label))
+        if label_alias and label_alias.startswith(prefix):
+            return FieldNameResolution(label_alias, matched=True, method="semantic-label-map")
 
         label_match = self._resolve_by_unique_token_match(label, prefix=prefix)
         if label_match is not None:
@@ -188,6 +202,42 @@ def load_livecycle_mapping_aliases(path: str | Path | None, known_names: set[str
     return aliases
 
 
+def load_semantic_label_aliases(path: str | Path | None, known_names: set[str]) -> dict[str, str]:
+    if path is None:
+        return {}
+
+    known_casefold = {name.casefold(): name for name in known_names}
+    aliases: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = set(reader.fieldnames or [])
+        if "label" not in fieldnames or "field_name" not in fieldnames:
+            raise ValueError("Semantic field map CSV must include label and field_name columns.")
+
+        for row_number, row in enumerate(reader, start=2):
+            label = (row.get("label") or "").strip()
+            field_name = (row.get("field_name") or "").strip()
+            if not label or not field_name:
+                continue
+            canonical = known_casefold.get(field_name.casefold())
+            if canonical is None:
+                raise ValueError(
+                    f"Semantic field map row {row_number} references unknown Plan-T field: {field_name}"
+                )
+            key = _normalize_label(label)
+            if not key:
+                continue
+            existing = aliases.get(key)
+            if existing and existing != canonical:
+                ambiguous.add(key)
+                aliases.pop(key, None)
+                continue
+            if key not in ambiguous:
+                aliases[key] = canonical
+    return aliases
+
+
 def _candidate_names(field_name: str) -> list[tuple[str, str]]:
     candidates: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -237,6 +287,12 @@ def _tokens(text: str) -> set[str]:
         for token in re.findall(r"[A-Za-z0-9]+", text)
         if len(token) >= 2
     }
+
+
+def _normalize_label(label: str) -> str:
+    normalized = re.sub(r"[\s:：־–—_-]+", " ", label.strip().casefold())
+    normalized = re.sub(r"[^\w\u0590-\u05FF ]+", "", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def _cell(row: list[str], index: int) -> str:

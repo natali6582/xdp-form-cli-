@@ -22,6 +22,7 @@ from xdp_form_cli.auto_form import (
     _checkbox_base_name,
     _filter_specs_by_original_content,
     _matches_signature_context_word,
+    _nearest_label,
     write_field_csv,
 )
 from xdp_form_cli.cli import main
@@ -233,6 +234,41 @@ def test_build_auto_client_form_reports_plan_t_match_count(tmp_path: Path) -> No
     assert count == 1
     assert "txtAccountName" in csv_path.read_text(encoding="utf-8")
     assert summary.warnings == ("Plan-T field-name resolver matched all 1 field(s).",)
+
+
+def test_build_auto_client_form_uses_semantic_map_and_writes_report(tmp_path: Path) -> None:
+    source = _write_account_owner_pdf(tmp_path / "account_owner.pdf")
+    fields_list = tmp_path / "plan_t_fields.csv"
+    fields_list.write_text("field_name,prefix\ntxtAccountName,txt\n", encoding="utf-8")
+    semantic_map = tmp_path / "semantic.csv"
+    semantic_map.write_text("label,field_name\nName Of Account Owner,txtAccountName\n", encoding="utf-8")
+    mapping_report = tmp_path / "mapping_report.csv"
+
+    _output, csv_path, count, summary = build_auto_client_form(
+        source,
+        tmp_path / "out.pdf",
+        fields_list_path=fields_list,
+        semantic_map_path=semantic_map,
+        mapping_report_path=mapping_report,
+    )
+
+    assert count == 1
+    assert "txtAccountName" in csv_path.read_text(encoding="utf-8")
+    report = mapping_report.read_text(encoding="utf-8-sig")
+    assert "detected_label" in report
+    assert "Name Of Account Owner" in report
+    assert "semantic-label-map" in report
+    assert summary.warnings == ("Plan-T field-name resolver matched all 1 field(s).",)
+
+
+def test_nearest_label_ignores_garbled_local_text_when_azure_label_is_readable() -> None:
+    box = DetectedBox(page=1, x=100.0, y=200.0, w=120.0, h=12.0)
+    anchors = [
+        TextAnchor("\x00\x03\x00¦\x00³\x00\x03\x00", 105.0, 196.0),
+        TextAnchor("TIN", 108.0, 195.0),
+    ]
+
+    assert _nearest_label(box, anchors) == "TIN"
 
 
 def _write_line_drawn_checkbox_pdf(path: Path) -> Path:

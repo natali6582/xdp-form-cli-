@@ -117,6 +117,9 @@ class AutoFieldSpec:
     y: float
     w: float
     h: float
+    label: str = ""
+    name_match_method: str = "generated"
+    name_matched_plan_t: bool = False
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,13 @@ class AzureLayoutResult:
     anchors_by_page: dict[int, list[TextAnchor]]
     checkbox_boxes_by_page: dict[int, list[DetectedBox]]
     warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResolvedAutoName:
+    name: str
+    matched: bool
+    method: str
 
 
 def build_auto_form(
@@ -163,6 +173,8 @@ def build_auto_client_form(
     use_azure_document_intelligence: bool | None = None,
     fields_list_path: str | Path | None = None,
     field_mapping_path: str | Path | None = None,
+    semantic_map_path: str | Path | None = None,
+    mapping_report_path: str | Path | None = None,
 ) -> tuple[Path, Path, int, AutoClientFormSummary]:
     """Build a client-upload fillable AcroForm and return a detection summary."""
     output, csv_out, specs, warnings = _build_detected_form(
@@ -172,7 +184,10 @@ def build_auto_client_form(
         use_azure_document_intelligence=use_azure_document_intelligence,
         fields_list_path=fields_list_path,
         field_mapping_path=field_mapping_path,
+        semantic_map_path=semantic_map_path,
     )
+    if mapping_report_path is not None:
+        write_mapping_report(specs, mapping_report_path)
     return output, csv_out, len(specs), _summarize_specs(specs, warnings=warnings)
 
 
@@ -185,6 +200,7 @@ def _build_detected_form(
     use_azure_document_intelligence: bool | None = None,
     fields_list_path: str | Path | None = None,
     field_mapping_path: str | Path | None = None,
+    semantic_map_path: str | Path | None = None,
 ) -> tuple[Path, Path, list[AutoFieldSpec], tuple[str, ...]]:
     output = Path(output_path)
     csv_out = Path(csv_path) if csv_path else output.with_suffix(".fields.csv")
@@ -206,6 +222,7 @@ def _build_detected_form(
         field_name_resolver = FieldNameResolver.from_files(
             fields_list_csv=fields_list_path,
             mapping_xlsx=field_mapping_path,
+            semantic_map_csv=semantic_map_path,
         )
         specs = detect_field_specs(
             stripped,
@@ -349,7 +366,7 @@ def detect_field_specs(
             for box in checkbox_boxes:
                 label = _nearest_label(box, anchors)
                 base = _checkbox_base_name(label)
-                name = _resolve_auto_field_name(
+                resolution = _resolve_auto_field_name(
                     base,
                     field_type="checkbox",
                     label=label,
@@ -357,9 +374,12 @@ def detect_field_specs(
                     field_name_resolver=field_name_resolver,
                 )
                 specs.append(AutoFieldSpec(
-                    page=box.page, name=name, field_type="checkbox",
+                    page=box.page, name=resolution.name, field_type="checkbox",
                     x=round(box.x, 2), y=round(box.y, 2),
                     w=round(box.w, 2), h=round(box.h, 2),
+                    label=label,
+                    name_match_method=resolution.method,
+                    name_matched_plan_t=resolution.matched,
                 ))
             geo_boxes = _filter_fillable_text_boxes(geo_boxes, anchors)
             # Underscore runs are themselves a strong fillable-field signal
@@ -371,7 +391,7 @@ def detect_field_specs(
                 is_signature = _is_signature_label(label)
                 base = _field_base_name(label, is_signature)
                 field_type = "image" if is_signature else "text"
-                name = _resolve_auto_field_name(
+                resolution = _resolve_auto_field_name(
                     base,
                     field_type=field_type,
                     label=label,
@@ -382,12 +402,15 @@ def detect_field_specs(
                 specs.append(
                     AutoFieldSpec(
                         page=box.page,
-                        name=name,
+                        name=resolution.name,
                         field_type=field_type,
                         x=round(box.x, 2),
                         y=round(box.y, 2),
                         w=round(box.w, 2),
                         h=round(h, 2),
+                        label=label,
+                        name_match_method=resolution.method,
+                        name_matched_plan_t=resolution.matched,
                     )
                 )
     specs = _filter_specs_by_original_content(pdf_path, specs)
@@ -712,6 +735,9 @@ def _apply_signature_context_rows(
                 y=spec.y,
                 w=spec.w,
                 h=spec.h,
+                label=spec.label,
+                name_match_method=spec.name_match_method,
+                name_matched_plan_t=spec.name_matched_plan_t,
             ))
         else:
             updated.append(spec)
@@ -726,6 +752,42 @@ def write_field_csv(specs: list[AutoFieldSpec], csv_path: str | Path) -> Path:
         for spec in specs:
             writer.writerow(
                 [spec.page, spec.name, spec.field_type, spec.x, spec.y, spec.w, spec.h, ""]
+            )
+    return path
+
+
+def write_mapping_report(specs: list[AutoFieldSpec], report_path: str | Path) -> Path:
+    path = Path(report_path)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "page",
+                "name",
+                "type",
+                "x",
+                "y",
+                "w",
+                "h",
+                "detected_label",
+                "plan_t_matched",
+                "match_method",
+            ]
+        )
+        for spec in specs:
+            writer.writerow(
+                [
+                    spec.page,
+                    spec.name,
+                    spec.field_type,
+                    spec.x,
+                    spec.y,
+                    spec.w,
+                    spec.h,
+                    spec.label,
+                    "yes" if spec.name_matched_plan_t else "no",
+                    spec.name_match_method,
+                ]
             )
     return path
 
@@ -1660,7 +1722,7 @@ def _nearest_label(box: DetectedBox, anchors: list[TextAnchor]) -> str:
     best: str | None = None
     best_score = float("inf")
     for anchor in anchors:
-        if _effective_text_len(anchor.text) == 0:
+        if not _looks_like_readable_label(anchor.text):
             continue
         below_gap = box.y - anchor.y
         if 0 < below_gap <= 28 and box.x - 10 <= anchor.x <= box.x + box.w + 10:
@@ -1679,6 +1741,17 @@ def _nearest_label(box: DetectedBox, anchors: list[TextAnchor]) -> str:
             best_score = score
             best = anchor.text
     return best or ""
+
+
+def _looks_like_readable_label(label: str) -> bool:
+    if _effective_text_len(label) == 0:
+        return False
+    if any(ord(ch) < 32 and ch not in "\t\r\n" for ch in label):
+        return False
+    non_printable = sum(1 for ch in label if not ch.isprintable())
+    if non_printable and non_printable / max(len(label), 1) > 0.05:
+        return False
+    return True
 
 
 def _is_signature_label(label: str) -> bool:
@@ -1733,14 +1806,22 @@ def _resolve_auto_field_name(
     label: str,
     used_names: dict[str, int],
     field_name_resolver: FieldNameResolver | None,
-) -> str:
+) -> ResolvedAutoName:
     if field_name_resolver is None:
-        return _unique_name(base, used_names)
+        return ResolvedAutoName(_unique_name(base, used_names), matched=False, method="generated")
 
     resolution = field_name_resolver.resolve(base, field_type=field_type, label=label)
     if resolution.matched:
-        return field_name_resolver.unique_name(resolution.name, used_names)
-    return _unique_name(resolution.name, used_names)
+        return ResolvedAutoName(
+            field_name_resolver.unique_name(resolution.name, used_names),
+            matched=True,
+            method=resolution.method,
+        )
+    return ResolvedAutoName(
+        _unique_name(resolution.name, used_names),
+        matched=False,
+        method=resolution.method,
+    )
 
 
 def _unique_name(base: str, used_names: dict[str, int]) -> str:

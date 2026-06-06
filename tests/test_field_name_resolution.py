@@ -3,7 +3,11 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from xdp_form_cli.field_name_resolution import FieldNameResolver, load_livecycle_mapping_aliases
+from xdp_form_cli.field_name_resolution import (
+    FieldNameResolver,
+    load_livecycle_mapping_aliases,
+    load_semantic_label_aliases,
+)
 
 
 def test_livecycle_mapping_loads_only_direct_safe_aliases(tmp_path: Path) -> None:
@@ -46,6 +50,23 @@ def test_resolver_does_not_choose_between_ambiguous_label_matches() -> None:
 
     assert resolution.name == "txtFullName"
     assert not resolution.matched
+
+
+def test_semantic_label_map_resolves_hebrew_or_flat_pdf_labels(tmp_path: Path) -> None:
+    semantic_map = tmp_path / "semantic.csv"
+    semantic_map.write_text(
+        "label,field_name\n"
+        "שם בעל החשבון,txtAccountName\n"
+        "TIN,txtPersonITIN\n",
+        encoding="utf-8",
+    )
+    known = {"txtAccountName", "txtPersonITIN"}
+
+    aliases = load_semantic_label_aliases(semantic_map, known)
+    resolver = FieldNameResolver(known, label_aliases=aliases)
+
+    assert resolver.resolve("txtField", field_type="text", label="שם בעל החשבון").name == "txtAccountName"
+    assert resolver.resolve("txtTin", field_type="text", label="TIN").name == "txtPersonITIN"
 
 
 def _write_mapping_workbook(path: Path, rows: list[tuple[str, str, str, str]]) -> Path:
