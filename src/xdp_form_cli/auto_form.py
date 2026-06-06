@@ -703,7 +703,7 @@ def _apply_signature_context_rows(
     if not contexts:
         return specs
 
-    signature_targets: set[tuple[int, float]] = set()
+    signature_targets: set[tuple[int, float, float, str]] = set()
     for page, context_y in contexts:
         candidates = [
             spec for spec in specs
@@ -722,11 +722,12 @@ def _apply_signature_context_rows(
         if len(row) < 2:
             continue
         for spec in row:
-            signature_targets.add((spec.page, spec.y))
+            if _can_convert_to_signature_image(spec):
+                signature_targets.add((spec.page, spec.x, spec.y, spec.name))
 
     updated: list[AutoFieldSpec] = []
     for spec in specs:
-        if (spec.page, spec.y) in signature_targets and spec.field_type == "text":
+        if (spec.page, spec.x, spec.y, spec.name) in signature_targets and spec.field_type == "text":
             updated.append(AutoFieldSpec(
                 page=spec.page,
                 name=spec.name.replace("txt", "img", 1) if spec.name.startswith("txt") else f"img{spec.name}",
@@ -742,6 +743,25 @@ def _apply_signature_context_rows(
         else:
             updated.append(spec)
     return updated
+
+
+def _can_convert_to_signature_image(spec: AutoFieldSpec) -> bool:
+    """Guard context-based signature conversion from consuming normal fields.
+
+    A nearby word such as "Signature" can describe a whole section, but ordinary
+    labels in that section ("Amount", "Date", "Name", "Title") must remain text.
+    """
+    label = spec.label.strip()
+    if not _looks_like_text(label):
+        return True
+    if _is_signature_label(label):
+        return True
+
+    normalized = re.sub(r"[^a-z0-9\u0590-\u05FF]+", " ", label.casefold()).strip()
+    tokens = set(normalized.split())
+    if not tokens:
+        return True
+    return tokens <= {"by"}
 
 
 def write_field_csv(specs: list[AutoFieldSpec], csv_path: str | Path) -> Path:

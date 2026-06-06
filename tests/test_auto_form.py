@@ -907,6 +907,43 @@ def test_apply_signature_context_rows_marks_only_closest_row_below_context_as_im
     assert by_name["txtOther"].field_type == "text"
 
 
+def test_apply_signature_context_rows_does_not_convert_labeled_amount_fields_to_images() -> None:
+    specs = [
+        AutoFieldSpec(
+            page=19,
+            name="txtAmount",
+            field_type="text",
+            x=80.0,
+            y=280.0,
+            w=160.0,
+            h=12.0,
+            label="Amount:",
+            name_match_method="exact",
+            name_matched_plan_t=True,
+        ),
+        AutoFieldSpec(
+            page=19,
+            name="txtDate",
+            field_type="text",
+            x=270.0,
+            y=280.0,
+            w=120.0,
+            h=12.0,
+            label="Date:",
+            name_match_method="exact",
+            name_matched_plan_t=True,
+        ),
+    ]
+
+    updated = _apply_signature_context_rows(specs, [(19, 336.0)])
+
+    assert [(spec.name, spec.field_type) for spec in updated] == [
+        ("txtAmount", "text"),
+        ("txtDate", "text"),
+    ]
+    assert all(spec.name_matched_plan_t for spec in updated)
+
+
 def _write_unlabeled_horizontal_line_pdf(path: Path) -> Path:
     pdf = pikepdf.Pdf.new()
     pdf.add_blank_page(page_size=(300, 400))
