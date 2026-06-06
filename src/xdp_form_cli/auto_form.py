@@ -36,6 +36,7 @@ import pikepdf
 from pikepdf import Name
 
 from xdp_form_cli.acroform_builder import create_acroform_pdf
+from xdp_form_cli.field_name_resolution import FieldNameResolver
 from xdp_form_cli.field_validation import ParsedField, _validate_original_content_overlap
 from xdp_form_cli.xfa_stripper import pdf_has_xfa, strip_xfa
 
@@ -160,6 +161,8 @@ def build_auto_client_form(
     *,
     csv_path: str | Path | None = None,
     use_azure_document_intelligence: bool | None = None,
+    fields_list_path: str | Path | None = None,
+    field_mapping_path: str | Path | None = None,
 ) -> tuple[Path, Path, int, AutoClientFormSummary]:
     """Build a client-upload fillable AcroForm and return a detection summary."""
     output, csv_out, specs, warnings = _build_detected_form(
@@ -167,6 +170,8 @@ def build_auto_client_form(
         output_path,
         csv_path=csv_path,
         use_azure_document_intelligence=use_azure_document_intelligence,
+        fields_list_path=fields_list_path,
+        field_mapping_path=field_mapping_path,
     )
     return output, csv_out, len(specs), _summarize_specs(specs, warnings=warnings)
 
@@ -178,6 +183,8 @@ def _build_detected_form(
     csv_path: str | Path | None,
     xfa_template_path: str | Path | None = None,
     use_azure_document_intelligence: bool | None = None,
+    fields_list_path: str | Path | None = None,
+    field_mapping_path: str | Path | None = None,
 ) -> tuple[Path, Path, list[AutoFieldSpec], tuple[str, ...]]:
     output = Path(output_path)
     csv_out = Path(csv_path) if csv_path else output.with_suffix(".fields.csv")
@@ -196,7 +203,16 @@ def _build_detected_form(
             stripped,
             enabled=_should_use_azure_document_intelligence(use_azure_document_intelligence),
         )
-        specs = detect_field_specs(stripped, azure_layout=azure_layout)
+        field_name_resolver = FieldNameResolver.from_files(
+            fields_list_csv=fields_list_path,
+            mapping_xlsx=field_mapping_path,
+        )
+        specs = detect_field_specs(
+            stripped,
+            azure_layout=azure_layout,
+            field_name_resolver=field_name_resolver,
+        )
+        naming_warnings = _field_name_resolution_warnings(specs, field_name_resolver)
         if not specs:
             raise ValueError(
                 "No fillable boxes were detected on this PDF. "
@@ -224,7 +240,8 @@ def _build_detected_form(
         else:
             create_acroform_pdf(stripped, csv_out, output)
 
-    warnings = azure_layout.warnings if azure_layout is not None else ()
+    azure_warnings = azure_layout.warnings if azure_layout is not None else ()
+    warnings = (*azure_warnings, *naming_warnings)
     return output, csv_out, specs, warnings
 
 
@@ -235,10 +252,27 @@ def _summarize_specs(specs: list[AutoFieldSpec], *, warnings: tuple[str, ...] = 
     return AutoClientFormSummary(type_counts=dict(sorted(counts.items())), warnings=warnings)
 
 
+def _field_name_resolution_warnings(
+    specs: list[AutoFieldSpec],
+    field_name_resolver: FieldNameResolver | None,
+) -> tuple[str, ...]:
+    if field_name_resolver is None:
+        return ()
+
+    matched = sum(1 for spec in specs if field_name_resolver.is_known_name(spec.name))
+    if matched == len(specs):
+        return (f"Plan-T field-name resolver matched all {matched} field(s).",)
+    return (
+        f"Plan-T field-name resolver matched {matched}/{len(specs)} field(s); "
+        "unmatched fields kept generated names and need manual mapping.",
+    )
+
+
 def detect_field_specs(
     pdf_path: str | Path,
     *,
     azure_layout: AzureLayoutResult | None = None,
+    field_name_resolver: FieldNameResolver | None = None,
 ) -> list[AutoFieldSpec]:
     """Detect input boxes on every page and turn them into field specs."""
     specs: list[AutoFieldSpec] = []
@@ -315,7 +349,13 @@ def detect_field_specs(
             for box in checkbox_boxes:
                 label = _nearest_label(box, anchors)
                 base = _checkbox_base_name(label)
-                name = _unique_name(base, used_names)
+                name = _resolve_auto_field_name(
+                    base,
+                    field_type="checkbox",
+                    label=label,
+                    used_names=used_names,
+                    field_name_resolver=field_name_resolver,
+                )
                 specs.append(AutoFieldSpec(
                     page=box.page, name=name, field_type="checkbox",
                     x=round(box.x, 2), y=round(box.y, 2),
@@ -330,8 +370,14 @@ def detect_field_specs(
                 label = _nearest_label(box, anchors)
                 is_signature = _is_signature_label(label)
                 base = _field_base_name(label, is_signature)
-                name = _unique_name(base, used_names)
                 field_type = "image" if is_signature else "text"
+                name = _resolve_auto_field_name(
+                    base,
+                    field_type=field_type,
+                    label=label,
+                    used_names=used_names,
+                    field_name_resolver=field_name_resolver,
+                )
                 h = min(box.h, MAX_FIELD_HEIGHT_PT)
                 specs.append(
                     AutoFieldSpec(
@@ -1678,6 +1724,23 @@ def _checkbox_base_name(label: str) -> str:
     if not slug:
         return "checkboxField"
     return f"checkbox{slug[:32]}"
+
+
+def _resolve_auto_field_name(
+    base: str,
+    *,
+    field_type: str,
+    label: str,
+    used_names: dict[str, int],
+    field_name_resolver: FieldNameResolver | None,
+) -> str:
+    if field_name_resolver is None:
+        return _unique_name(base, used_names)
+
+    resolution = field_name_resolver.resolve(base, field_type=field_type, label=label)
+    if resolution.matched:
+        return field_name_resolver.unique_name(resolution.name, used_names)
+    return _unique_name(resolution.name, used_names)
 
 
 def _unique_name(base: str, used_names: dict[str, int]) -> str:

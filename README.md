@@ -167,6 +167,16 @@ xdp-form-cli auto-client-form --input "C:\path\uploaded.pdf" --output "C:\path\u
 
 Azure uses the `prebuilt-layout` model by default. It supplements the local detector with OCR text labels, word boxes, and selection marks. If Azure credentials or the SDK are missing, the command continues with local detection and prints a warning.
 
+Use the Plan-T field list and the LiveCycle mapping workbook when building a client-upload PDF:
+
+```powershell
+xdp-form-cli auto-client-form --azure-document-intelligence --input "C:\path\uploaded.pdf" --output "C:\path\uploaded_acroform.pdf" --fields-csv "C:\path\uploaded_fields.csv" --fields-list "C:\path\רשימת שדות מהקוד.csv" --field-mapping-xlsx "C:\path\מיפוי שדות LiveCycle מול קוד המערכת.xlsx"
+```
+
+`--fields-list` is the canonical allow-list of field names accepted by Plan-T.
+`--field-mapping-xlsx` adds safe direct aliases from existing LiveCycle names to Plan-T names.
+For flat PDFs with no original field names, only exact or unambiguous matches are renamed automatically; unmatched detected fields keep generated names and are reported in the command warnings so they can be mapped manually instead of silently filling the wrong system field.
+
 Convert field names in a PDF using the default Plan-T code file:
 
 ```powershell

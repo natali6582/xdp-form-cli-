@@ -25,6 +25,7 @@ from xdp_form_cli.auto_form import (
     write_field_csv,
 )
 from xdp_form_cli.cli import main
+from xdp_form_cli.field_name_resolution import FieldNameResolver
 
 
 def _write_boxed_pdf(path: Path) -> Path:
@@ -177,6 +178,61 @@ def test_auto_client_form_cli_writes_pdf_and_csv(tmp_path: Path) -> None:
     assert exit_code == 0
     assert output.is_file()
     assert csv_path.is_file()
+
+
+def _write_account_owner_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(320, 400))
+    content = (
+        b"BT /F1 10 Tf 40 320 Td (Name Of Account Owner) Tj ET\n"
+        b"170 312 120 14 re S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_uses_plan_t_resolver_alias(tmp_path: Path) -> None:
+    source = _write_account_owner_pdf(tmp_path / "account_owner.pdf")
+    resolver = FieldNameResolver(
+        {"txtAccountName"},
+        aliases={"txtNameOfAccountOwner": "txtAccountName"},
+    )
+
+    specs = detect_field_specs(source, field_name_resolver=resolver)
+
+    assert len(specs) == 1
+    assert specs[0].name == "txtAccountName"
+
+
+def _write_account_name_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(320, 400))
+    content = (
+        b"BT /F1 10 Tf 40 320 Td (Account Name) Tj ET\n"
+        b"170 312 120 14 re S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_build_auto_client_form_reports_plan_t_match_count(tmp_path: Path) -> None:
+    source = _write_account_name_pdf(tmp_path / "account_name.pdf")
+    fields_list = tmp_path / "plan_t_fields.csv"
+    fields_list.write_text("field_name,prefix\ntxtAccountName,txt\n", encoding="utf-8")
+
+    _output, csv_path, count, summary = build_auto_client_form(
+        source,
+        tmp_path / "out.pdf",
+        fields_list_path=fields_list,
+    )
+
+    assert count == 1
+    assert "txtAccountName" in csv_path.read_text(encoding="utf-8")
+    assert summary.warnings == ("Plan-T field-name resolver matched all 1 field(s).",)
 
 
 def _write_line_drawn_checkbox_pdf(path: Path) -> Path:

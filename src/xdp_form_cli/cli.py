@@ -135,6 +135,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional path for the emitted editable field CSV (defaults next to --output).",
     )
     auto_client_form_parser.add_argument(
+        "--fields-list",
+        default=None,
+        help="Optional CSV of Plan-T-supported field names. Safe matches are renamed to these canonical names.",
+    )
+    auto_client_form_parser.add_argument(
+        "--field-mapping-xlsx",
+        default=None,
+        help="Optional LiveCycle-to-Plan-T mapping workbook, such as מיפוי שדות LiveCycle מול קוד המערכת.xlsx.",
+    )
+    auto_client_form_parser.add_argument(
         "--azure-document-intelligence",
         action="store_true",
         help="Use Azure Document Intelligence prebuilt-layout as an optional OCR/layout fallback.",
@@ -389,6 +399,8 @@ def cmd_auto_client_form(args: argparse.Namespace) -> int:
         args.output,
         csv_path=args.fields_csv,
         use_azure_document_intelligence=args.azure_document_intelligence,
+        fields_list_path=args.fields_list,
+        field_mapping_path=args.field_mapping_xlsx,
     )
     colors.success(f"Detected and placed {count} field(s).")
     colors.info(
