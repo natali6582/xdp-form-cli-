@@ -8,6 +8,7 @@ from xdp_form_cli import __version__
 from xdp_form_cli.acroform_builder import create_acroform_pdf
 from xdp_form_cli.auto_form import build_auto_client_form, build_auto_form
 from xdp_form_cli.approved_visual_fields import APPROVED_VISUAL_FIELDS
+from xdp_form_cli.azure_report import build_azure_layout_report
 from xdp_form_cli import colors
 from xdp_form_cli.field_conversion import convert_editor_fields
 from xdp_form_cli.field_examples import add_example_fields_to_truth
@@ -138,6 +139,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use Azure Document Intelligence prebuilt-layout as an optional OCR/layout fallback.",
     )
+
+    azure_report_parser = subparsers.add_parser(
+        "azure-layout-report",
+        help="Run Azure Document Intelligence only and write a raw layout/candidate-field report.",
+    )
+    azure_report_parser.add_argument("--input", required=True, help="Path to the source PDF file.")
+    azure_report_parser.add_argument(
+        "--fields-list",
+        required=True,
+        help="CSV of Plan-T-supported field names, usually רשימת שדות מהקוד.csv.",
+    )
+    azure_report_parser.add_argument("--output-csv", required=True, help="Path to write the Azure layout CSV report.")
+    azure_report_parser.add_argument("--output-json", default=None, help="Optional path to write the Azure layout JSON report.")
 
     create_acroform = subparsers.add_parser(
         "create-acroform",
@@ -390,6 +404,31 @@ def cmd_auto_client_form(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_azure_layout_report(args: argparse.Namespace) -> int:
+    if not _is_pdf(args.input):
+        raise ValueError("azure-layout-report --input must be a PDF file.")
+
+    colors.step("Running Azure Document Intelligence prebuilt-layout only.")
+    colors.info("No local field-detection logic is used in this report.")
+    summary = build_azure_layout_report(
+        args.input,
+        args.fields_list,
+        args.output_csv,
+        output_json=args.output_json,
+    )
+    colors.success(f"Loaded {summary.known_field_count} Plan-T field name(s).")
+    colors.success(
+        "Azure result: "
+        f"words={summary.word_count}, text-lines={summary.anchor_count}, "
+        f"candidate-text-fields={summary.candidate_text_field_count}, "
+        f"candidate-checkboxes={summary.checkbox_count}."
+    )
+    colors.success(f"Saved Azure CSV report: {summary.csv_path}")
+    if summary.json_path is not None:
+        colors.success(f"Saved Azure JSON report: {summary.json_path}")
+    return 0
+
+
 def cmd_create_acroform(args: argparse.Namespace) -> int:
     if args.input == args.output:
         raise ValueError("--output must be a new file path, not the source file.")
@@ -487,6 +526,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_auto_form(args)
         if args.command == "auto-client-form":
             return cmd_auto_client_form(args)
+        if args.command == "azure-layout-report":
+            return cmd_azure_layout_report(args)
         if args.command == "create-acroform":
             return cmd_create_acroform(args)
         if args.command == "validate-acroform":
