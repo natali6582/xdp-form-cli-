@@ -14,7 +14,7 @@ import pikepdf
 
 REQUIRED_COLUMNS = ("page", "name", "type", "x", "y", "w", "h")
 OPTIONAL_COLUMNS = ("value",)
-SUPPORTED_TYPES = {"text", "tx", "textarea", "checkbox", "check", "chk", "image", "img", "signature", "sig"}
+SUPPORTED_TYPES = {"text", "tx", "textarea", "checkbox", "check", "chk", "image", "img"}
 OVERLAP_RENDER_DPI = 72
 OVERLAP_DARK_PIXEL_THRESHOLD = 90
 OVERLAP_DARK_RATIO_LIMIT = 0.08
@@ -239,16 +239,6 @@ def _validate_signature_fields(fields: list[ParsedField], names: Counter[str]) -
                     "Signature image fields must use type=image, not type="
                     + field.field_type
                     + ".",
-                    page=field.page,
-                    field=field.name,
-                )
-            )
-        if field.field_type == "signature":
-            issues.append(
-                ValidationIssue(
-                    "ERROR",
-                    "digital-signature-type",
-                    "Use type=image for image signatures. type=signature creates a real digital-signature field.",
                     page=field.page,
                     field=field.name,
                 )
@@ -547,8 +537,6 @@ def _normalize_type(field_type: str) -> str:
         return "checkbox"
     if field_type == "img":
         return "image"
-    if field_type == "sig":
-        return "signature"
     return field_type
 
 

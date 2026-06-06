@@ -7,6 +7,7 @@ import pytest
 from pikepdf import Array, Dictionary, Name, String
 
 from xdp_form_cli.acroform_builder import create_acroform_pdf, load_field_specs
+from xdp_form_cli.field_validation import validate_acroform
 
 
 def _write_field_specs(path: Path, rows: list[str]) -> Path:
@@ -145,3 +146,27 @@ def test_generated_text_fields_are_transparent_images_are_push_buttons_and_check
         normal_appearance = checkbox[Name("/AP")][Name("/N")]
         assert Name("/Off") in normal_appearance
         assert Name("/Yes") in normal_appearance
+
+
+def test_validation_accepts_image_signature_pushbutton_background(tmp_path: Path) -> None:
+    source = _write_blank_pdf(tmp_path / "source.pdf")
+    specs = _write_field_specs(
+        tmp_path / "fields.csv",
+        ["1,imgPersonSignature,image,20,20,100,20,"],
+    )
+    output, _ = create_acroform_pdf(source, specs, tmp_path / "output.pdf")
+
+    with pikepdf.Pdf.open(output, allow_overwriting_input=True) as pdf:
+        field = pdf.Root[Name("/AcroForm")][Name("/Fields")][0]
+        field[Name("/Border")] = Array([0, 0, 1])
+        field[Name("/BS")] = Dictionary(W=1, S=Name("/B"))
+        field[Name("/MK")] = Dictionary(
+            BG=Array([212 / 255, 208 / 255, 200 / 255]),
+            BC=Array([0, 0, 0]),
+        )
+        field[Name("/H")] = Name("/P")
+        pdf.save(output)
+
+    result = validate_acroform(specs, output_pdf=output)
+
+    assert result.errors == []

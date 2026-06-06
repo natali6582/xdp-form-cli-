@@ -115,7 +115,7 @@ page,name,type,x,y,w,h,value
 1,imgInvestorSignature,image,120,470,180,28,
 ```
 
-Supported field types are `text`, `textarea`, `checkbox`, and `image`. All signature placeholders, including names such as `imgPersonSignature`, must use `type=image`; real PDF digital-signature fields (`/Sig`) are intentionally not supported. Coordinates are PDF points from the bottom-left of the page.
+Supported field types are `text`, `textarea`, `checkbox`, and `image`. All signature placeholders, including names such as `imgPersonSignature`, must use `type=image`; real PDF digital-signature fields (`/Sig`) are intentionally not supported. Image fields are generated as regular push-button placeholders with push highlighting, raised border, and grey button fill. Coordinates are PDF points from the bottom-left of the page.
 
 Validate a field-spec CSV before creating a PDF:
 
