@@ -6,6 +6,7 @@ from pathlib import Path
 from xdp_form_cli.field_name_resolution import (
     FieldNameResolver,
     load_livecycle_mapping_aliases,
+    load_semantic_field_aliases,
     load_semantic_label_aliases,
 )
 
@@ -67,6 +68,21 @@ def test_semantic_label_map_resolves_hebrew_or_flat_pdf_labels(tmp_path: Path) -
 
     assert resolver.resolve("txtField", field_type="text", label="שם בעל החשבון").name == "txtAccountName"
     assert resolver.resolve("txtTin", field_type="text", label="TIN").name == "txtPersonITIN"
+
+
+def test_semantic_map_can_resolve_generated_field_names(tmp_path: Path) -> None:
+    semantic_map = tmp_path / "semantic.csv"
+    semantic_map.write_text(
+        "name,label,field_name\n"
+        "txtField2,TIN,txtPersonITIN\n",
+        encoding="utf-8",
+    )
+    known = {"txtPersonITIN"}
+
+    name_aliases, label_aliases = load_semantic_field_aliases(semantic_map, known)
+    resolver = FieldNameResolver(known, aliases=name_aliases, label_aliases=label_aliases)
+
+    assert resolver.resolve("txtField2", field_type="text", label="").name == "txtPersonITIN"
 
 
 def _write_mapping_workbook(path: Path, rows: list[tuple[str, str, str, str]]) -> Path:

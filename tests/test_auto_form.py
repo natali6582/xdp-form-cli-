@@ -261,6 +261,44 @@ def test_build_auto_client_form_uses_semantic_map_and_writes_report(tmp_path: Pa
     assert summary.warnings == ("Plan-T field-name resolver matched all 1 field(s).",)
 
 
+def _write_two_unreadable_label_fields_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(360, 420))
+    content = (
+        b"BT /F1 10 Tf 40 360 Td (BBBBBBBBBBBBBBBB) Tj ET\n"
+        b"BT /F1 10 Tf 40 300 Td (BBBBBBBBBBBBBBBB) Tj ET\n"
+        b"150 352 120 14 re S\n"
+        b"150 292 120 14 re S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_build_auto_client_form_semantic_map_can_target_generated_names(tmp_path: Path) -> None:
+    source = _write_two_unreadable_label_fields_pdf(tmp_path / "two_fields.pdf")
+    fields_list = tmp_path / "plan_t_fields.csv"
+    fields_list.write_text("field_name,prefix\ntxtPersonITIN,txt\n", encoding="utf-8")
+    semantic_map = tmp_path / "semantic.csv"
+    semantic_map.write_text("name,field_name\ntxtField2,txtPersonITIN\n", encoding="utf-8")
+
+    _output, csv_path, count, summary = build_auto_client_form(
+        source,
+        tmp_path / "out.pdf",
+        fields_list_path=fields_list,
+        semantic_map_path=semantic_map,
+    )
+
+    assert count == 2
+    csv_text = csv_path.read_text(encoding="utf-8")
+    assert "txtPersonITIN" in csv_text
+    assert "txtField," in csv_text
+    assert summary.warnings == (
+        "Plan-T field-name resolver matched 1/2 field(s); unmatched fields kept generated names and need manual mapping.",
+    )
+
+
 def test_nearest_label_ignores_garbled_local_text_when_azure_label_is_readable() -> None:
     box = DetectedBox(page=1, x=100.0, y=200.0, w=120.0, h=12.0)
     anchors = [

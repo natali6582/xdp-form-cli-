@@ -1812,19 +1812,46 @@ def _resolve_auto_field_name(
 
     resolution = field_name_resolver.resolve(base, field_type=field_type, label=label)
     if resolution.matched:
+        if resolution.name != base:
+            _reserve_next_unique_name(base, used_names)
         return ResolvedAutoName(
             field_name_resolver.unique_name(resolution.name, used_names),
             matched=True,
             method=resolution.method,
         )
+
+    generated_name, generated_count = _preview_unique_name(base, used_names)
+    generated_resolution = field_name_resolver.resolve(generated_name, field_type=field_type, label="")
+    if generated_resolution.matched:
+        _reserve_unique_name(base, generated_count, used_names)
+        return ResolvedAutoName(
+            field_name_resolver.unique_name(generated_resolution.name, used_names),
+            matched=True,
+            method=generated_resolution.method,
+        )
+
     return ResolvedAutoName(
-        _unique_name(resolution.name, used_names),
+        _reserve_unique_name(resolution.name, generated_count, used_names),
         matched=False,
         method=resolution.method,
     )
 
 
 def _unique_name(base: str, used_names: dict[str, int]) -> str:
+    name, count = _preview_unique_name(base, used_names)
+    return _reserve_unique_name(base, count, used_names)
+
+
+def _reserve_next_unique_name(base: str, used_names: dict[str, int]) -> str:
+    name, count = _preview_unique_name(base, used_names)
+    return _reserve_unique_name(base, count, used_names)
+
+
+def _preview_unique_name(base: str, used_names: dict[str, int]) -> tuple[str, int]:
     count = used_names.get(base, 0) + 1
+    return (base if count == 1 else f"{base}{count}"), count
+
+
+def _reserve_unique_name(base: str, count: int, used_names: dict[str, int]) -> str:
     used_names[base] = count
     return base if count == 1 else f"{base}{count}"

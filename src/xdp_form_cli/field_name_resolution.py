@@ -58,7 +58,11 @@ class FieldNameResolver:
 
         known_names = load_known_field_names(fields_list_csv) if fields_list_csv else set()
         aliases = load_livecycle_mapping_aliases(mapping_xlsx, known_names) if mapping_xlsx else {}
-        label_aliases = load_semantic_label_aliases(semantic_map_csv, known_names) if semantic_map_csv else {}
+        semantic_name_aliases, label_aliases = (
+            load_semantic_field_aliases(semantic_map_csv, known_names)
+            if semantic_map_csv else ({}, {})
+        )
+        aliases.update(semantic_name_aliases)
         if not known_names and aliases:
             known_names = set(aliases.values())
         if not known_names and label_aliases:
@@ -203,39 +207,71 @@ def load_livecycle_mapping_aliases(path: str | Path | None, known_names: set[str
 
 
 def load_semantic_label_aliases(path: str | Path | None, known_names: set[str]) -> dict[str, str]:
+    _name_aliases, label_aliases = load_semantic_field_aliases(path, known_names)
+    return label_aliases
+
+
+def load_semantic_field_aliases(
+    path: str | Path | None,
+    known_names: set[str],
+) -> tuple[dict[str, str], dict[str, str]]:
     if path is None:
-        return {}
+        return {}, {}
 
     known_casefold = {name.casefold(): name for name in known_names}
-    aliases: dict[str, str] = {}
-    ambiguous: set[str] = set()
+    name_aliases: dict[str, str] = {}
+    label_aliases: dict[str, str] = {}
+    ambiguous_names: set[str] = set()
+    ambiguous_labels: set[str] = set()
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         fieldnames = set(reader.fieldnames or [])
-        if "label" not in fieldnames or "field_name" not in fieldnames:
-            raise ValueError("Semantic field map CSV must include label and field_name columns.")
+        if "field_name" not in fieldnames or not ({"label", "name"} & fieldnames):
+            raise ValueError("Semantic field map CSV must include field_name and at least one of label/name columns.")
 
         for row_number, row in enumerate(reader, start=2):
             label = (row.get("label") or "").strip()
+            name = (row.get("name") or "").strip()
             field_name = (row.get("field_name") or "").strip()
-            if not label or not field_name:
+            if not field_name or (not label and not name):
                 continue
             canonical = known_casefold.get(field_name.casefold())
             if canonical is None:
                 raise ValueError(
                     f"Semantic field map row {row_number} references unknown Plan-T field: {field_name}"
                 )
-            key = _normalize_label(label)
-            if not key:
-                continue
-            existing = aliases.get(key)
-            if existing and existing != canonical:
-                ambiguous.add(key)
-                aliases.pop(key, None)
-                continue
-            if key not in ambiguous:
-                aliases[key] = canonical
-    return aliases
+            if name:
+                _add_unambiguous_alias(
+                    name_aliases,
+                    ambiguous_names,
+                    name.casefold(),
+                    canonical,
+                )
+            if label:
+                label_key = _normalize_label(label)
+                if label_key:
+                    _add_unambiguous_alias(
+                        label_aliases,
+                        ambiguous_labels,
+                        label_key,
+                        canonical,
+                    )
+    return name_aliases, label_aliases
+
+
+def _add_unambiguous_alias(
+    aliases: dict[str, str],
+    ambiguous: set[str],
+    key: str,
+    canonical: str,
+) -> None:
+    existing = aliases.get(key)
+    if existing and existing != canonical:
+        ambiguous.add(key)
+        aliases.pop(key, None)
+        return
+    if key not in ambiguous:
+        aliases[key] = canonical
 
 
 def _candidate_names(field_name: str) -> list[tuple[str, str]]:
