@@ -26,6 +26,7 @@ where = ["src"]
 
 [project.optional-dependencies]
 placement = ["Pillow>=10.0.0", "numpy>=1.24.0"]
+azure = ["azure-ai-documentintelligence>=1.0.0", "azure-core>=1.30.0"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

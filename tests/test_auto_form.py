@@ -9,7 +9,10 @@ from pikepdf import Dictionary, Name
 
 from xdp_form_cli.auto_form import (
     AutoFieldSpec,
+    AzureLayoutResult,
+    DetectedBox,
     MAX_FIELD_HEIGHT_PT,
+    TextAnchor,
     build_auto_client_form,
     build_auto_form,
     detect_field_specs,
@@ -772,3 +775,61 @@ def test_apply_signature_context_rows_marks_only_closest_row_below_context_as_im
     assert by_name["imgRight"].field_type == "image"
     assert by_name["txtName"].field_type == "text"
     assert by_name["txtOther"].field_type == "text"
+
+
+def _write_unlabeled_horizontal_line_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(b"120 250 m 240 250 l S\n")
+    pdf.save(path)
+    return path
+
+
+def test_azure_anchor_keeps_line_when_pdf_text_is_not_decodable(tmp_path: Path) -> None:
+    source = _write_unlabeled_horizontal_line_pdf(tmp_path / "azure_label.pdf")
+    layout = AzureLayoutResult(
+        words_by_page={},
+        anchors_by_page={1: [TextAnchor("Approved commitment amount", 122.0, 232.0)]},
+        checkbox_boxes_by_page={},
+    )
+
+    specs = detect_field_specs(source, azure_layout=layout)
+
+    assert len(specs) == 1
+    assert specs[0].field_type == "text"
+    assert round(specs[0].x) == 120
+    assert round(specs[0].w) == 120
+
+
+def test_azure_selection_mark_is_used_as_checkbox(tmp_path: Path) -> None:
+    source = _write_unlabeled_horizontal_line_pdf(tmp_path / "azure_checkbox.pdf")
+    layout = AzureLayoutResult(
+        words_by_page={},
+        anchors_by_page={1: [TextAnchor("I approve", 80.0, 96.0)]},
+        checkbox_boxes_by_page={1: [DetectedBox(page=1, x=50.0, y=92.0, w=11.0, h=11.0)]},
+    )
+
+    specs = detect_field_specs(source, azure_layout=layout)
+
+    checkboxes = [spec for spec in specs if spec.field_type == "checkbox"]
+    assert len(checkboxes) == 1
+    assert checkboxes[0].name.startswith("checkbox")
+
+
+def test_build_auto_client_form_warns_when_azure_credentials_are_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", raising=False)
+    monkeypatch.delenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", raising=False)
+    source = _write_boxed_pdf(tmp_path / "boxed.pdf")
+
+    _output, _csv, count, summary = build_auto_client_form(
+        source,
+        tmp_path / "out.pdf",
+        use_azure_document_intelligence=True,
+    )
+
+    assert count == 2
+    assert any("Azure Document Intelligence skipped" in warning for warning in summary.warnings)

@@ -22,6 +22,7 @@ from __future__ import annotations
 import csv
 import decimal
 import html
+import os
 import re
 import shutil
 import subprocess
@@ -70,6 +71,14 @@ CHECKBOX_GLYPHS = ("\x00\x86", "\x86", "☐", "□", "☑", "☒")
 # Cap on a downloaded PDF to avoid pulling an unbounded response into memory.
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
+# Optional Azure Document Intelligence integration. It is opt-in because each
+# call sends the PDF to Azure and may incur cost.
+AZURE_ENDPOINT_ENV = "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT"
+AZURE_KEY_ENV = "AZURE_DOCUMENT_INTELLIGENCE_KEY"
+AZURE_MODEL_ID_ENV = "AZURE_DOCUMENT_INTELLIGENCE_MODEL_ID"
+AZURE_USE_ENV = "XDP_FORM_USE_AZURE_DOCUMENT_INTELLIGENCE"
+AZURE_DEFAULT_MODEL_ID = "prebuilt-layout"
+
 
 @dataclass(frozen=True)
 class TextAnchor:
@@ -115,22 +124,32 @@ class AutoClientFormSummary:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class AzureLayoutResult:
+    words_by_page: dict[int, list[BBoxWord]]
+    anchors_by_page: dict[int, list[TextAnchor]]
+    checkbox_boxes_by_page: dict[int, list[DetectedBox]]
+    warnings: tuple[str, ...] = ()
+
+
 def build_auto_form(
     source: str | Path,
     output_path: str | Path,
     *,
     csv_path: str | Path | None = None,
     xfa_template_path: str | Path | None = None,
+    use_azure_document_intelligence: bool | None = None,
 ) -> tuple[Path, Path, int]:
     """Build a fillable AcroForm from a URL or local PDF path.
 
     Returns ``(output_pdf, fields_csv, field_count)``.
     """
-    output, csv_out, specs = _build_detected_form(
+    output, csv_out, specs, _warnings = _build_detected_form(
         source,
         output_path,
         csv_path=csv_path,
         xfa_template_path=xfa_template_path,
+        use_azure_document_intelligence=use_azure_document_intelligence,
     )
     return output, csv_out, len(specs)
 
@@ -140,10 +159,16 @@ def build_auto_client_form(
     output_path: str | Path,
     *,
     csv_path: str | Path | None = None,
+    use_azure_document_intelligence: bool | None = None,
 ) -> tuple[Path, Path, int, AutoClientFormSummary]:
     """Build a client-upload fillable AcroForm and return a detection summary."""
-    output, csv_out, specs = _build_detected_form(source, output_path, csv_path=csv_path)
-    return output, csv_out, len(specs), _summarize_specs(specs)
+    output, csv_out, specs, warnings = _build_detected_form(
+        source,
+        output_path,
+        csv_path=csv_path,
+        use_azure_document_intelligence=use_azure_document_intelligence,
+    )
+    return output, csv_out, len(specs), _summarize_specs(specs, warnings=warnings)
 
 
 def _build_detected_form(
@@ -152,7 +177,8 @@ def _build_detected_form(
     *,
     csv_path: str | Path | None,
     xfa_template_path: str | Path | None = None,
-) -> tuple[Path, Path, list[AutoFieldSpec]]:
+    use_azure_document_intelligence: bool | None = None,
+) -> tuple[Path, Path, list[AutoFieldSpec], tuple[str, ...]]:
     output = Path(output_path)
     csv_out = Path(csv_path) if csv_path else output.with_suffix(".fields.csv")
 
@@ -166,7 +192,11 @@ def _build_detected_form(
         stripped = Path(tmp_dir) / "stripped.pdf"
         strip_xfa(local_source, stripped)
 
-        specs = detect_field_specs(stripped)
+        azure_layout = _load_azure_layout(
+            stripped,
+            enabled=_should_use_azure_document_intelligence(use_azure_document_intelligence),
+        )
+        specs = detect_field_specs(stripped, azure_layout=azure_layout)
         if not specs:
             raise ValueError(
                 "No fillable boxes were detected on this PDF. "
@@ -194,27 +224,42 @@ def _build_detected_form(
         else:
             create_acroform_pdf(stripped, csv_out, output)
 
-    return output, csv_out, specs
+    warnings = azure_layout.warnings if azure_layout is not None else ()
+    return output, csv_out, specs, warnings
 
 
-def _summarize_specs(specs: list[AutoFieldSpec]) -> AutoClientFormSummary:
+def _summarize_specs(specs: list[AutoFieldSpec], *, warnings: tuple[str, ...] = ()) -> AutoClientFormSummary:
     counts: dict[str, int] = {}
     for spec in specs:
         counts[spec.field_type] = counts.get(spec.field_type, 0) + 1
-    return AutoClientFormSummary(type_counts=dict(sorted(counts.items())))
+    return AutoClientFormSummary(type_counts=dict(sorted(counts.items())), warnings=warnings)
 
 
-def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
+def detect_field_specs(
+    pdf_path: str | Path,
+    *,
+    azure_layout: AzureLayoutResult | None = None,
+) -> list[AutoFieldSpec]:
     """Detect input boxes on every page and turn them into field specs."""
     specs: list[AutoFieldSpec] = []
     used_names: dict[str, int] = {}
     bbox_xml = _read_bbox_xml(pdf_path)
     bbox_underline_boxes = _bbox_underline_boxes_from_xml(bbox_xml) if bbox_xml else {}
     bbox_checkbox_boxes = _bbox_checkbox_boxes_from_xml(bbox_xml) if bbox_xml else {}
+    azure_underline_boxes = (
+        _bbox_underline_boxes_from_words(azure_layout.words_by_page)
+        if azure_layout is not None else {}
+    )
+    azure_checkbox_boxes = (
+        _bbox_checkbox_boxes_from_words(azure_layout.words_by_page)
+        if azure_layout is not None else {}
+    )
 
     with pikepdf.Pdf.open(str(pdf_path)) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
             anchors = _extract_text_anchors(page)
+            if azure_layout is not None:
+                anchors.extend(azure_layout.anchors_by_page.get(page_index, []))
             geo_boxes = _detect_boxes(page, page_index)
             underline_boxes = [
                 b for b in _detect_underline_boxes(page, page_index)
@@ -222,6 +267,10 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
             ]
             underline_boxes.extend(
                 b for b in bbox_underline_boxes.get(page_index, [])
+                if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
+            )
+            underline_boxes.extend(
+                b for b in azure_underline_boxes.get(page_index, [])
                 if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
             )
             checkbox_boxes = [
@@ -245,6 +294,23 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
                     and not _overlaps_any(b, checkbox_boxes)
                 )
             )
+            checkbox_boxes.extend(
+                b for b in azure_checkbox_boxes.get(page_index, [])
+                if (
+                    not _overlaps_any(b, geo_boxes)
+                    and not _overlaps_any(b, underline_boxes)
+                    and not _overlaps_any(b, checkbox_boxes)
+                )
+            )
+            if azure_layout is not None:
+                checkbox_boxes.extend(
+                    b for b in azure_layout.checkbox_boxes_by_page.get(page_index, [])
+                    if (
+                        not _overlaps_any(b, geo_boxes)
+                        and not _overlaps_any(b, underline_boxes)
+                        and not _overlaps_any(b, checkbox_boxes)
+                    )
+                )
             # Checkboxes are typed directly; text/image boxes go through label analysis.
             for box in checkbox_boxes:
                 label = _nearest_label(box, anchors)
@@ -279,7 +345,212 @@ def detect_field_specs(pdf_path: str | Path) -> list[AutoFieldSpec]:
                     )
                 )
     specs = _filter_specs_by_original_content(pdf_path, specs)
-    return _apply_signature_context_rows(specs, _signature_contexts_from_pdf_text(pdf_path))
+    contexts = _signature_contexts_from_pdf_text(pdf_path)
+    if azure_layout is not None:
+        contexts.extend(_signature_contexts_from_azure_layout(azure_layout))
+    return _apply_signature_context_rows(specs, contexts)
+
+
+def _should_use_azure_document_intelligence(value: bool | None) -> bool:
+    if value is not None:
+        return value
+    return os.environ.get(AZURE_USE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_azure_layout(pdf_path: str | Path, *, enabled: bool) -> AzureLayoutResult | None:
+    if not enabled:
+        return None
+
+    endpoint = os.environ.get(AZURE_ENDPOINT_ENV, "").strip()
+    key = os.environ.get(AZURE_KEY_ENV, "").strip()
+    model_id = os.environ.get(AZURE_MODEL_ID_ENV, AZURE_DEFAULT_MODEL_ID).strip() or AZURE_DEFAULT_MODEL_ID
+
+    if not endpoint or not key:
+        return AzureLayoutResult(
+            words_by_page={},
+            anchors_by_page={},
+            checkbox_boxes_by_page={},
+            warnings=(
+                f"Azure Document Intelligence skipped: set {AZURE_ENDPOINT_ENV} and {AZURE_KEY_ENV}.",
+            ),
+        )
+
+    try:
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
+        from azure.core.credentials import AzureKeyCredential
+    except ImportError:
+        return AzureLayoutResult(
+            words_by_page={},
+            anchors_by_page={},
+            checkbox_boxes_by_page={},
+            warnings=(
+                "Azure Document Intelligence skipped: install with `python -m pip install -e .[azure]`.",
+            ),
+        )
+
+    try:
+        client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+        with Path(pdf_path).open("rb") as handle:
+            try:
+                poller = client.begin_analyze_document(
+                    model_id,
+                    body=handle,
+                    content_type="application/pdf",
+                )
+            except TypeError:
+                handle.seek(0)
+                poller = client.begin_analyze_document(model_id, handle)
+            result = poller.result()
+    except Exception as exc:  # pragma: no cover - exact Azure exceptions vary by SDK/service
+        return AzureLayoutResult(
+            words_by_page={},
+            anchors_by_page={},
+            checkbox_boxes_by_page={},
+            warnings=(f"Azure Document Intelligence skipped after service error: {exc}",),
+        )
+
+    layout = _azure_layout_from_result(pdf_path, result)
+    if not layout.words_by_page and not layout.anchors_by_page and not layout.checkbox_boxes_by_page:
+        return AzureLayoutResult(
+            words_by_page={},
+            anchors_by_page={},
+            checkbox_boxes_by_page={},
+            warnings=("Azure Document Intelligence returned no layout items.",),
+        )
+    return layout
+
+
+def _azure_layout_from_result(pdf_path: str | Path, result: object) -> AzureLayoutResult:
+    page_sizes = _pdf_page_sizes(pdf_path)
+    words_by_page: dict[int, list[BBoxWord]] = {}
+    anchors_by_page: dict[int, list[TextAnchor]] = {}
+    checkbox_boxes_by_page: dict[int, list[DetectedBox]] = {}
+
+    for fallback_index, azure_page in enumerate(getattr(result, "pages", []) or [], start=1):
+        page_number = int(getattr(azure_page, "page_number", fallback_index) or fallback_index)
+        pdf_w, pdf_h = page_sizes.get(page_number, (612.0, 792.0))
+        source_w = float(getattr(azure_page, "width", pdf_w) or pdf_w)
+        source_h = float(getattr(azure_page, "height", pdf_h) or pdf_h)
+
+        for word in getattr(azure_page, "words", []) or []:
+            text = str(getattr(word, "content", "") or "").strip()
+            if not text:
+                continue
+            bounds = _azure_polygon_bounds(getattr(word, "polygon", None))
+            if bounds is None:
+                continue
+            x0, y0, x1, y1 = _scale_azure_bounds(bounds, source_w, source_h, pdf_w, pdf_h)
+            words_by_page.setdefault(page_number, []).append(
+                BBoxWord(
+                    page=page_number,
+                    page_height=pdf_h,
+                    text=text,
+                    x0=x0,
+                    y0=y0,
+                    x1=x1,
+                    y1=y1,
+                )
+            )
+            anchors_by_page.setdefault(page_number, []).append(TextAnchor(text, x0, pdf_h - y1))
+
+        for line in getattr(azure_page, "lines", []) or []:
+            text = str(getattr(line, "content", "") or "").strip()
+            if not text:
+                continue
+            bounds = _azure_polygon_bounds(getattr(line, "polygon", None))
+            if bounds is None:
+                continue
+            x0, _y0, _x1, y1 = _scale_azure_bounds(bounds, source_w, source_h, pdf_w, pdf_h)
+            anchors_by_page.setdefault(page_number, []).append(TextAnchor(text, x0, pdf_h - y1))
+
+        for mark in getattr(azure_page, "selection_marks", []) or []:
+            bounds = _azure_polygon_bounds(getattr(mark, "polygon", None))
+            if bounds is None:
+                continue
+            x0, y0, x1, y1 = _scale_azure_bounds(bounds, source_w, source_h, pdf_w, pdf_h)
+            width = x1 - x0
+            height = y1 - y0
+            if not (5.0 <= width <= 30.0 and 5.0 <= height <= 30.0):
+                continue
+            checkbox_boxes_by_page.setdefault(page_number, []).append(
+                DetectedBox(
+                    page=page_number,
+                    x=round(x0, 1),
+                    y=round(pdf_h - y1, 1),
+                    w=round(width, 1),
+                    h=round(height, 1),
+                )
+            )
+
+    return AzureLayoutResult(
+        words_by_page={page: sorted(words, key=lambda w: (w.y0, w.x0)) for page, words in words_by_page.items()},
+        anchors_by_page=anchors_by_page,
+        checkbox_boxes_by_page=checkbox_boxes_by_page,
+    )
+
+
+def _pdf_page_sizes(pdf_path: str | Path) -> dict[int, tuple[float, float]]:
+    sizes: dict[int, tuple[float, float]] = {}
+    with pikepdf.Pdf.open(str(pdf_path)) as pdf:
+        for page_number, page in enumerate(pdf.pages, start=1):
+            box = page.mediabox
+            sizes[page_number] = (float(box[2]) - float(box[0]), float(box[3]) - float(box[1]))
+    return sizes
+
+
+def _azure_polygon_bounds(polygon: object) -> tuple[float, float, float, float] | None:
+    if not polygon:
+        return None
+
+    xs: list[float] = []
+    ys: list[float] = []
+    values = list(polygon)
+    for item in values:
+        if hasattr(item, "x") and hasattr(item, "y"):
+            xs.append(float(item.x))
+            ys.append(float(item.y))
+        elif isinstance(item, dict) and "x" in item and "y" in item:
+            xs.append(float(item["x"]))
+            ys.append(float(item["y"]))
+
+    if not xs and len(values) >= 4 and len(values) % 2 == 0:
+        try:
+            numbers = [float(value) for value in values]
+        except (TypeError, ValueError):
+            numbers = []
+        xs = numbers[0::2]
+        ys = numbers[1::2]
+
+    if not xs or not ys:
+        return None
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _scale_azure_bounds(
+    bounds: tuple[float, float, float, float],
+    source_w: float,
+    source_h: float,
+    pdf_w: float,
+    pdf_h: float,
+) -> tuple[float, float, float, float]:
+    x0, y0, x1, y1 = bounds
+    source_w = source_w or pdf_w
+    source_h = source_h or pdf_h
+    return (
+        x0 / source_w * pdf_w,
+        y0 / source_h * pdf_h,
+        x1 / source_w * pdf_w,
+        y1 / source_h * pdf_h,
+    )
+
+
+def _signature_contexts_from_azure_layout(layout: AzureLayoutResult) -> list[tuple[int, float]]:
+    contexts: list[tuple[int, float]] = []
+    for page, anchors in layout.anchors_by_page.items():
+        for anchor in anchors:
+            if _matches_signature_context_word(anchor.text):
+                contexts.append((page, anchor.y))
+    return contexts
 
 
 def _filter_specs_by_original_content(pdf_path: str | Path, specs: list[AutoFieldSpec]) -> list[AutoFieldSpec]:
@@ -479,8 +750,10 @@ def _read_bbox_xml(pdf_path: str | Path) -> str:
 
 
 def _bbox_underline_boxes_from_xml(xml_text: str) -> dict[int, list[DetectedBox]]:
-    words_by_page = _bbox_words_by_page_from_xml(xml_text)
+    return _bbox_underline_boxes_from_words(_bbox_words_by_page_from_xml(xml_text))
 
+
+def _bbox_underline_boxes_from_words(words_by_page: dict[int, list[BBoxWord]]) -> dict[int, list[DetectedBox]]:
     boxes_by_page: dict[int, list[DetectedBox]] = {}
     for page, words in words_by_page.items():
         boxes: list[DetectedBox] = []
@@ -498,8 +771,10 @@ def _bbox_underline_boxes_from_xml(xml_text: str) -> dict[int, list[DetectedBox]
 
 
 def _bbox_checkbox_boxes_from_xml(xml_text: str) -> dict[int, list[DetectedBox]]:
-    words_by_page = _bbox_words_by_page_from_xml(xml_text)
+    return _bbox_checkbox_boxes_from_words(_bbox_words_by_page_from_xml(xml_text))
 
+
+def _bbox_checkbox_boxes_from_words(words_by_page: dict[int, list[BBoxWord]]) -> dict[int, list[DetectedBox]]:
     boxes_by_page: dict[int, list[DetectedBox]] = {}
     for page, words in words_by_page.items():
         boxes: list[DetectedBox] = []

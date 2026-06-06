@@ -26,11 +26,18 @@ The tool is fund-agnostic. Do not encode investment fund, real-estate fund, or d
 - Python 3.10+
 - `lxml`
 - `pikepdf`
+- Optional Azure OCR/layout fallback: `azure-ai-documentintelligence`
 
 ## Install locally
 
 ```powershell
 python -m pip install -e .
+```
+
+Install with Azure Document Intelligence support:
+
+```powershell
+python -m pip install -e .[azure]
 ```
 
 ## Internal web app
@@ -66,6 +73,13 @@ Recommended setup:
 - Health check path: `/healthz`
 
 You can either create the service from `render.yaml` or create a new Docker web service and let Render detect the repository `Dockerfile`.
+
+To enable Azure Document Intelligence in Render, set these environment variables:
+
+- `XDP_FORM_USE_AZURE_DOCUMENT_INTELLIGENCE=1`
+- `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT`
+- `AZURE_DOCUMENT_INTELLIGENCE_KEY`
+- Optional: `AZURE_DOCUMENT_INTELLIGENCE_MODEL_ID`, default `prebuilt-layout`
 
 ## Commands
 
@@ -144,6 +158,14 @@ xdp-form-cli auto-client-form --input "C:\path\uploaded.pdf" --output "C:\path\u
 ```
 
 `auto-client-form` detects visible field areas, including text underlines/boxes, vector checkboxes, glyph-rendered checkboxes, and signature labels when they can be read from the PDF. It keeps fill lines that have a label before, after, or below the line, including cases such as `example____`, `____example`, `example____example`, `*____`, `By: ____`, and `Date: ____`. It also supports repeated underscore/CID glyph lines, multiple fields on the same row, and long labels below a line such as an approved commitment amount. The detector filters likely underlined headings, normal text tables, and fields that would cover existing dark printed content. It writes both the fillable PDF and an editable CSV; review the CSV before production use because flat PDFs can contain font-encoded labels that cannot always be decoded reliably.
+
+Use Azure Document Intelligence as an optional OCR/layout fallback:
+
+```powershell
+xdp-form-cli auto-client-form --input "C:\path\uploaded.pdf" --output "C:\path\uploaded_acroform.pdf" --fields-csv "C:\path\uploaded_fields.csv" --azure-document-intelligence
+```
+
+Azure uses the `prebuilt-layout` model by default. It supplements the local detector with OCR text labels, word boxes, and selection marks. If Azure credentials or the SDK are missing, the command continues with local detection and prints a warning.
 
 Convert field names in a PDF using the default Plan-T code file:
 

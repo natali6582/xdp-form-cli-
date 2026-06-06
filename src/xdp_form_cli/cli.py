@@ -103,6 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional XFA/XDP template file. Fields are injected into this template "
         "and embedded in the output PDF alongside the AcroForm layer.",
     )
+    auto_form_parser.add_argument(
+        "--azure-document-intelligence",
+        action="store_true",
+        help="Use Azure Document Intelligence prebuilt-layout as an optional OCR/layout fallback.",
+    )
 
     auto_client_form_parser = subparsers.add_parser(
         "auto-client-form",
@@ -127,6 +132,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--fields-csv",
         default=None,
         help="Optional path for the emitted editable field CSV (defaults next to --output).",
+    )
+    auto_client_form_parser.add_argument(
+        "--azure-document-intelligence",
+        action="store_true",
+        help="Use Azure Document Intelligence prebuilt-layout as an optional OCR/layout fallback.",
     )
 
     create_acroform = subparsers.add_parser(
@@ -335,7 +345,11 @@ def cmd_auto_form(args: argparse.Namespace) -> int:
 
     colors.step(f"Loading source: {source}")
     output, csv_path, count = build_auto_form(
-        source, args.output, csv_path=args.fields_csv, xfa_template_path=args.xfa
+        source,
+        args.output,
+        csv_path=args.fields_csv,
+        xfa_template_path=args.xfa,
+        use_azure_document_intelligence=args.azure_document_intelligence,
     )
     colors.success(f"Detected and placed {count} field(s).")
     colors.success(f"Saved editable field CSV: {csv_path}")
@@ -356,7 +370,12 @@ def cmd_auto_client_form(args: argparse.Namespace) -> int:
         raise ValueError("auto-client-form --input must be a PDF file.")
 
     colors.step(f"Loading client upload: {source}")
-    output, csv_path, count, summary = build_auto_client_form(source, args.output, csv_path=args.fields_csv)
+    output, csv_path, count, summary = build_auto_client_form(
+        source,
+        args.output,
+        csv_path=args.fields_csv,
+        use_azure_document_intelligence=args.azure_document_intelligence,
+    )
     colors.success(f"Detected and placed {count} field(s).")
     colors.info(
         "Field type counts: "

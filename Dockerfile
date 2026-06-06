@@ -13,7 +13,7 @@ RUN apt-get update \
 COPY pyproject.toml README.md /app/
 COPY src /app/src
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir .[azure]
 
 EXPOSE 10000
 
