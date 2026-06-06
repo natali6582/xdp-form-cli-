@@ -11,3 +11,11 @@ services:
         value: "1"
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: XDP_FORM_USE_AZURE_DOCUMENT_INTELLIGENCE
+        value: "1"
+      - key: AZURE_DOCUMENT_INTELLIGENCE_MODEL_ID
+        value: "prebuilt-layout"
+      - key: AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT
+        sync: false
+      - key: AZURE_DOCUMENT_INTELLIGENCE_KEY
+        sync: false

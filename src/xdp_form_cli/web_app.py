@@ -8,7 +8,7 @@ from pathlib import Path
 
 from flask import Flask, abort, render_template_string, request, send_file
 
-from xdp_form_cli.auto_form import MAX_DOWNLOAD_BYTES, build_auto_form
+from xdp_form_cli.auto_form import MAX_DOWNLOAD_BYTES, build_auto_client_form
 from xdp_form_cli.acroform_builder import load_field_specs
 from xdp_form_cli.field_transfer import transfer_fields_to_pdf
 
@@ -23,6 +23,7 @@ INDEX_TEMPLATE = """
     body { font-family: Arial, sans-serif; margin: 2rem; max-width: 56rem; }
     form { border: 1px solid #ccc; padding: 1rem; border-radius: 8px; }
     .error { color: #a40000; margin-bottom: 1rem; }
+    .warning { color: #8a5a00; }
     .result { border: 1px solid #ccc; padding: 1rem; border-radius: 8px; margin-top: 1rem; }
     .muted { color: #555; font-size: 0.95rem; }
     button { padding: 0.6rem 1rem; }
@@ -46,6 +47,14 @@ INDEX_TEMPLATE = """
     <h2>Output PDF ready</h2>
     <p><strong>Detected fields:</strong> {{ result.field_count }}</p>
     <p><strong>Field types:</strong> {{ result.summary }}</p>
+    {% if result.warnings %}
+    <p><strong>Warnings:</strong></p>
+    <ul>
+      {% for warning in result.warnings %}
+      <li class="warning">{{ warning }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
     <p><a href="{{ result.pdf_url }}">Download PDF</a></p>
     <p><a href="{{ result.csv_url }}">Download CSV</a></p>
   </div>
@@ -113,9 +122,11 @@ def create_app(config: dict | None = None) -> Flask:
             if template_pdf is not None:
                 _, _, count = transfer_fields_to_pdf(template_pdf, input_pdf, output_pdf, csv_path=output_csv)
                 summary_text = "template-transfer"
+                warnings = ()
             else:
-                _, _, count = build_auto_form(input_pdf, output_pdf, csv_path=output_csv)
-                summary_text = _summarize_csv_types(output_csv)
+                _, _, count, summary = build_auto_client_form(input_pdf, output_pdf, csv_path=output_csv)
+                summary_text = _format_type_counts(summary.type_counts)
+                warnings = summary.warnings
         except Exception as exc:  # pragma: no cover - exact PDF parser exceptions vary
             return render_template_string(INDEX_TEMPLATE, error=str(exc), result=None), 500
 
@@ -134,6 +145,7 @@ def create_app(config: dict | None = None) -> Flask:
         result = {
             "field_count": count,
             "summary": summary_text,
+            "warnings": warnings,
             "pdf_url": f"/downloads/{job_id}/pdf",
             "csv_url": f"/downloads/{job_id}/csv",
         }
@@ -168,6 +180,10 @@ def _summarize_csv_types(csv_path: Path) -> str:
     counts: dict[str, int] = {}
     for spec in load_field_specs(csv_path):
         counts[spec.field_type] = counts.get(spec.field_type, 0) + 1
+    return ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+
+
+def _format_type_counts(counts: dict[str, int]) -> str:
     return ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
 
 
