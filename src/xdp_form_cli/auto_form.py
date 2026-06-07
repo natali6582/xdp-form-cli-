@@ -43,6 +43,13 @@ from xdp_form_cli.xfa_stripper import pdf_has_xfa, strip_xfa
 
 # Words that mark a box as a signature (image) field, in English and Hebrew.
 HEBREW_SIGNATURE_KEYWORDS = ("חתום", "חתימה", "חתימת", "חותם", "החתום")
+HEBREW_SIGNATURE_LEADING_WORDS = (
+    "\u05d7\u05ea\u05d9\u05de\u05d4",
+    "\u05d7\u05ea\u05d9\u05de\u05ea",
+    "\u05d7\u05ea\u05d9\u05de\u05d5\u05ea",
+    "\u05d7\u05d5\u05ea\u05dd",
+    "\u05d7\u05d5\u05ea\u05de\u05ea",
+)
 BBOX_WORD_RE = re.compile(
     r'<word\s+xMin="(?P<x0>[-0-9.]+)"\s+yMin="(?P<y0>[-0-9.]+)"\s+'
     r'xMax="(?P<x1>[-0-9.]+)"\s+yMax="(?P<y1>[-0-9.]+)">(?P<text>.*?)</word>'
@@ -120,6 +127,15 @@ class AutoFieldSpec:
     label: str = ""
     name_match_method: str = "generated"
     name_matched_plan_t: bool = False
+
+
+@dataclass(frozen=True)
+class SignatureContext:
+    page: int
+    x0: float
+    x1: float
+    y: float
+    direction: str
 
 
 @dataclass(frozen=True)
@@ -339,8 +355,9 @@ def detect_field_specs(
     specs: list[AutoFieldSpec] = []
     used_names: dict[str, int] = {}
     bbox_xml = _read_bbox_xml(pdf_path)
-    bbox_underline_boxes = _bbox_underline_boxes_from_xml(bbox_xml) if bbox_xml else {}
-    bbox_checkbox_boxes = _bbox_checkbox_boxes_from_xml(bbox_xml) if bbox_xml else {}
+    bbox_words_by_page = _bbox_words_by_page_from_xml(bbox_xml) if bbox_xml else {}
+    bbox_underline_boxes = _bbox_underline_boxes_from_words(bbox_words_by_page) if bbox_words_by_page else {}
+    bbox_checkbox_boxes = _bbox_checkbox_boxes_from_words(bbox_words_by_page) if bbox_words_by_page else {}
     azure_underline_boxes = (
         _bbox_underline_boxes_from_words(azure_layout.words_by_page)
         if azure_layout is not None else {}
@@ -356,8 +373,9 @@ def detect_field_specs(
             if azure_layout is not None:
                 anchors.extend(azure_layout.anchors_by_page.get(page_index, []))
             geo_boxes = _detect_boxes(page, page_index)
+            raw_underline_boxes = _detect_underline_boxes(page, page_index)
             underline_boxes = [
-                b for b in _detect_underline_boxes(page, page_index)
+                b for b in raw_underline_boxes
                 if not _overlaps_any(b, geo_boxes)
             ]
             underline_boxes.extend(
@@ -426,13 +444,20 @@ def detect_field_specs(
                     name_matched_plan_t=resolution.matched,
                 ))
             geo_boxes = _filter_fillable_text_boxes(geo_boxes, anchors)
+            underline_boxes.extend(
+                b for b in raw_underline_boxes
+                if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
+            )
             # Underscore runs are themselves a strong fillable-field signal
             # (for example: "Name ______, Number").  Keep them separate from
             # drawn table separators, which are filtered above.
             boxes = geo_boxes + underline_boxes
             for box in boxes:
                 label = _nearest_label(box, anchors)
-                is_signature = _is_signature_label(label)
+                is_signature = (
+                    _is_signature_label(label)
+                    or _bbox_has_signature_label_near_box(box, bbox_words_by_page.get(page_index, []))
+                )
                 base = _field_base_name(label, is_signature)
                 field_type = "image" if is_signature else "text"
                 resolution = _resolve_auto_field_name(
@@ -657,12 +682,13 @@ def _scale_azure_bounds(
     )
 
 
-def _signature_contexts_from_azure_layout(layout: AzureLayoutResult) -> list[tuple[int, float]]:
-    contexts: list[tuple[int, float]] = []
+def _signature_contexts_from_azure_layout(layout: AzureLayoutResult) -> list[SignatureContext]:
+    contexts: list[SignatureContext] = []
     for page, anchors in layout.anchors_by_page.items():
         for anchor in anchors:
-            if _matches_signature_context_word(anchor.text):
-                contexts.append((page, anchor.y))
+            direction = _signature_context_direction(anchor.text)
+            if direction:
+                contexts.append(SignatureContext(page=page, x0=anchor.x, x1=anchor.x, y=anchor.y, direction=direction))
     return contexts
 
 
@@ -690,7 +716,7 @@ def _filter_specs_by_original_content(pdf_path: str | Path, specs: list[AutoFiel
     return [spec for spec in specs if (spec.page, spec.name) not in blocked]
 
 
-def _signature_contexts_from_pdf_text(pdf_path: str | Path) -> list[tuple[int, float]]:
+def _signature_contexts_from_pdf_text(pdf_path: str | Path) -> list[SignatureContext]:
     if shutil.which("pdftotext") is None:
         return []
 
@@ -709,7 +735,7 @@ def _signature_contexts_from_pdf_text(pdf_path: str | Path) -> list[tuple[int, f
         except (OSError, subprocess.CalledProcessError):
             return []
 
-        contexts: list[tuple[int, float]] = []
+        contexts: list[SignatureContext] = []
         page_number = 0
         page_height = 0.0
         for line in bbox_path.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -723,47 +749,66 @@ def _signature_contexts_from_pdf_text(pdf_path: str | Path) -> list[tuple[int, f
             if page_number < 1 or page_height <= 0 or word_match is None:
                 continue
             word = html.unescape(word_match.group("text"))
-            if not _matches_signature_context_word(word):
+            direction = _signature_context_direction(word)
+            if not direction:
                 continue
             y_pdf = page_height - float(word_match.group("y1"))
-            contexts.append((page_number, y_pdf))
+            contexts.append(
+                SignatureContext(
+                    page=page_number,
+                    x0=float(word_match.group("x0")),
+                    x1=float(word_match.group("x1")),
+                    y=y_pdf,
+                    direction=direction,
+                )
+            )
         return contexts
 
 
 def _matches_signature_context_word(word: str) -> bool:
+    return _signature_context_direction(word) is not None
+
+
+def _signature_context_direction(word: str) -> str | None:
     cleaned = re.sub(r"[^\w\u0590-\u05FF]+", "", word).casefold()
     if not cleaned:
-        return False
+        return None
     reversed_cleaned = cleaned[::-1]
-    if any(keyword in cleaned for keyword in SIGNATURE_KEYWORDS):
-        return True
-    return any(keyword in cleaned or keyword in reversed_cleaned for keyword in HEBREW_SIGNATURE_KEYWORDS)
+    hebrew_keywords = HEBREW_SIGNATURE_LEADING_WORDS + HEBREW_SIGNATURE_KEYWORDS
+    if any(keyword in cleaned or keyword in reversed_cleaned for keyword in hebrew_keywords):
+        return "rtl"
+    if any(keyword.replace(" ", "") in cleaned for keyword in SIGNATURE_KEYWORDS):
+        return "ltr"
+    return None
 
 
 def _apply_signature_context_rows(
     specs: list[AutoFieldSpec],
-    contexts: list[tuple[int, float]],
+    contexts: list[SignatureContext | tuple[int, float]],
 ) -> list[AutoFieldSpec]:
     if not contexts:
         return specs
 
     signature_targets: set[tuple[int, float, float, str]] = set()
-    for page, context_y in contexts:
+    for raw_context in contexts:
+        context = _coerce_signature_context(raw_context)
         candidates = [
             spec for spec in specs
             if (
-                spec.page == page
+                spec.page == context.page
                 and spec.field_type == "text"
-                and spec.y < context_y
-                and context_y - spec.y <= 140
                 and spec.w >= 70
+                and _signature_context_allows_spec(context, spec)
             )
         ]
         if not candidates:
             continue
-        closest_y = max(spec.y for spec in candidates)
-        row = [spec for spec in candidates if abs(spec.y - closest_y) <= 3]
-        if len(row) < 2:
+        closest_distance = min(_signature_context_vertical_distance(context, spec) for spec in candidates)
+        row = [
+            spec for spec in candidates
+            if abs(_signature_context_vertical_distance(context, spec) - closest_distance) <= 3
+        ]
+        if len(row) < 2 and not (len(row) == 1 and closest_distance <= 50):
             continue
         for spec in row:
             if _can_convert_to_signature_image(spec):
@@ -787,6 +832,38 @@ def _apply_signature_context_rows(
         else:
             updated.append(spec)
     return updated
+
+
+def _coerce_signature_context(context: SignatureContext | tuple[int, float]) -> SignatureContext:
+    if isinstance(context, SignatureContext):
+        return context
+    page, y = context
+    return SignatureContext(page=page, x0=float("-inf"), x1=float("inf"), y=y, direction="any")
+
+
+def _signature_context_allows_spec(context: SignatureContext, spec: AutoFieldSpec) -> bool:
+    if _signature_context_is_same_line(context, spec):
+        if context.direction == "rtl":
+            return 0 <= context.x0 - (spec.x + spec.w) <= 90
+        if context.direction == "ltr":
+            return 0 <= spec.x - context.x1 <= 90
+        return True
+
+    if _signature_context_vertical_distance(context, spec) > 50:
+        return False
+
+    horizontal_gap = max(spec.x - context.x1, context.x0 - (spec.x + spec.w), 0)
+    return horizontal_gap <= 300
+
+
+def _signature_context_is_same_line(context: SignatureContext, spec: AutoFieldSpec) -> bool:
+    return abs(context.y - spec.y) <= 8
+
+
+def _signature_context_vertical_distance(context: SignatureContext, spec: AutoFieldSpec) -> float:
+    if spec.y <= context.y <= spec.y + spec.h:
+        return 0
+    return min(abs(context.y - spec.y), abs(context.y - (spec.y + spec.h)))
 
 
 def _can_convert_to_signature_image(spec: AutoFieldSpec) -> bool:
@@ -950,11 +1027,14 @@ def _bbox_checkbox_boxes_from_words(words_by_page: dict[int, list[BBoxWord]]) ->
     boxes_by_page: dict[int, list[DetectedBox]] = {}
     for page, words in words_by_page.items():
         boxes: list[DetectedBox] = []
-        for word in words:
-            box = _bbox_word_checkbox_box(word)
-            if box is None:
-                continue
-            if not _bbox_has_label_context(word, words):
+        candidates = [
+            (word, box)
+            for word in words
+            if (box := _bbox_word_checkbox_box(word)) is not None
+        ]
+        candidate_boxes = [box for _word, box in candidates]
+        for word, box in candidates:
+            if not _bbox_has_label_context(word, words) and not _is_grouped_checkbox_box(box, candidate_boxes):
                 continue
             if not _overlaps_any(box, boxes):
                 boxes.append(box)
@@ -1013,6 +1093,29 @@ def _bbox_word_checkbox_box(word: BBoxWord) -> DetectedBox | None:
     )
 
 
+def _is_grouped_checkbox_box(box: DetectedBox, boxes: list[DetectedBox]) -> bool:
+    return any(
+        other is not box and _checkbox_boxes_are_grouped(box, other)
+        for other in boxes
+    )
+
+
+def _checkbox_boxes_are_grouped(a: DetectedBox, b: DetectedBox) -> bool:
+    if a.page != b.page:
+        return False
+    if abs(a.w - b.w) > 3 or abs(a.h - b.h) > 3:
+        return False
+
+    same_column = abs(a.x - b.x) <= max(4.0, min(a.w, b.w) * 0.5)
+    vertical_gap = max(a.y - (b.y + b.h), b.y - (a.y + a.h), 0)
+    if same_column and 0 < vertical_gap <= 40:
+        return True
+
+    same_row = abs(a.y - b.y) <= max(4.0, min(a.h, b.h) * 0.5)
+    horizontal_gap = max(a.x - (b.x + b.w), b.x - (a.x + a.w), 0)
+    return same_row and 0 < horizontal_gap <= 50
+
+
 def _bbox_word_underline_box(word: BBoxWord) -> DetectedBox | None:
     matches = list(re.finditer(r"_+", word.text))
     if not matches:
@@ -1042,6 +1145,8 @@ def _bbox_has_fillable_context(source: BBoxWord, box: DetectedBox, words: list[B
     source_context = re.sub(r"_+", "", source.text)
     if _effective_text_len(source_context) > 0:
         return True
+    if _bbox_has_signature_label_near_box(box, words):
+        return True
 
     for word in words:
         if word is source or "_" in word.text:
@@ -1054,6 +1159,65 @@ def _bbox_has_fillable_context(source: BBoxWord, box: DetectedBox, words: list[B
         if gap <= 220:
             return True
     return False
+
+
+def _bbox_has_signature_label_near_box(box: DetectedBox, words: list[BBoxWord]) -> bool:
+    for word in words:
+        if "_" in word.text or _effective_text_len(word.text) == 0:
+            continue
+        if not _bbox_word_is_signature_label(word.text):
+            continue
+        if _bbox_signature_word_allows_box(word, box):
+            return True
+    return False
+
+
+def _bbox_word_is_signature_label(text: str) -> bool:
+    return _bbox_word_signature_direction(text) is not None
+
+
+def _bbox_word_signature_direction(text: str) -> str | None:
+    cleaned = re.sub(r"[^\w\u0590-\u05FF]+", "", text).casefold()
+    if not cleaned:
+        return None
+    reversed_cleaned = cleaned[::-1]
+    if cleaned in HEBREW_SIGNATURE_LEADING_WORDS or reversed_cleaned in HEBREW_SIGNATURE_LEADING_WORDS:
+        return "rtl"
+    if any(keyword.replace(" ", "") in cleaned for keyword in SIGNATURE_KEYWORDS):
+        return "ltr"
+    return None
+
+
+def _bbox_signature_word_allows_box(word: BBoxWord, box: DetectedBox) -> bool:
+    if _bbox_word_gap_to_pdf_box(word, box) > 45:
+        return False
+
+    direction = _bbox_word_signature_direction(word.text)
+    if direction is None:
+        return False
+    if not _bbox_word_is_same_line_as_pdf_box(word, box):
+        return True
+    if direction == "rtl":
+        return 0 <= word.x0 - (box.x + box.w) <= 90
+    if direction == "ltr":
+        return 0 <= box.x - word.x1 <= 90
+    return False
+
+
+def _bbox_word_gap_to_pdf_box(word: BBoxWord, box: DetectedBox) -> float:
+    box_x0 = box.x
+    box_x1 = box.x + box.w
+    box_y0 = word.page_height - (box.y + box.h)
+    box_y1 = word.page_height - box.y
+    horizontal_gap = max(box_x0 - word.x1, word.x0 - box_x1, 0)
+    vertical_gap = max(box_y0 - word.y1, word.y0 - box_y1, 0)
+    return max(horizontal_gap, vertical_gap)
+
+
+def _bbox_word_is_same_line_as_pdf_box(word: BBoxWord, box: DetectedBox) -> bool:
+    box_y0 = word.page_height - (box.y + box.h)
+    box_y1 = word.page_height - box.y
+    return max(box_y0 - word.y1, word.y0 - box_y1, 0) <= 8
 
 
 def _bbox_has_label_context(source: BBoxWord, words: list[BBoxWord]) -> bool:
@@ -1285,6 +1449,7 @@ def _overlaps_any(box: DetectedBox, others: list[DetectedBox]) -> bool:
 def _detect_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
     """Detect small approximately-square rectangles as checkbox fields."""
     checkboxes: list[tuple[float, float, float, float]] = []
+    line_segments: list[tuple[float, float, float, float]] = []
     pending: list[tuple[float, float, float, float]] = []
     clip_pending: list[tuple[float, float, float, float]] = []
     last_clip_rects: list[tuple[float, float, float, float]] = []
@@ -1356,6 +1521,9 @@ def _detect_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[Detected
             last_clip_rects.clear()
 
         elif op in ("S", "s", "f", "F", "f*", "B", "B*", "b", "b*"):
+            line_segment = _line_path_segment(current_path)
+            if line_segment is not None:
+                line_segments.append(line_segment)
             line_box = _line_path_checkbox(current_path)
             if line_box is not None:
                 pending.append(line_box)
@@ -1375,6 +1543,7 @@ def _detect_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[Detected
             pending.clear()
             current_path = []
 
+    checkboxes.extend(_checkboxes_from_line_segments(line_segments))
     unique = sorted(set(checkboxes), key=lambda r: (-r[1], r[0]))
     return [DetectedBox(page_index, x, y, w, h) for (x, y, w, h) in unique]
 
@@ -1450,6 +1619,60 @@ def _line_path_checkbox(points: list[tuple[float, float]]) -> tuple[float, float
     if not corners.issubset(actual):
         return None
     return (round(x, 1), round(y, 1), round(w, 1), round(h, 1))
+
+
+def _line_path_segment(points: list[tuple[float, float]]) -> tuple[float, float, float, float] | None:
+    if len(points) != 2:
+        return None
+    (x1, y1), (x2, y2) = points
+    if abs(x1 - x2) <= 0.5 and abs(y1 - y2) >= MIN_CHECKBOX_PT:
+        x = (x1 + x2) / 2
+        return (round(x, 1), round(min(y1, y2), 1), round(x, 1), round(max(y1, y2), 1))
+    if abs(y1 - y2) <= 0.5 and abs(x1 - x2) >= MIN_CHECKBOX_PT:
+        y = (y1 + y2) / 2
+        return (round(min(x1, x2), 1), round(y, 1), round(max(x1, x2), 1), round(y, 1))
+    return None
+
+
+def _checkboxes_from_line_segments(
+    segments: list[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    horizontal = [segment for segment in segments if abs(segment[1] - segment[3]) <= 0.5]
+    vertical = [segment for segment in segments if abs(segment[0] - segment[2]) <= 0.5]
+    boxes: list[tuple[float, float, float, float]] = []
+
+    for bottom in horizontal:
+        bx0, by, bx1, _ = bottom
+        for top in horizontal:
+            tx0, ty, tx1, _ = top
+            if ty <= by:
+                continue
+            h = ty - by
+            w = bx1 - bx0
+            if not (MIN_CHECKBOX_PT <= w <= MAX_CHECKBOX_PT and MIN_CHECKBOX_PT <= h <= MAX_CHECKBOX_PT):
+                continue
+            if abs(w - h) / max(w, h) >= 0.3:
+                continue
+            if abs(tx0 - bx0) > 1.0 or abs(tx1 - bx1) > 1.0:
+                continue
+            left = _has_matching_vertical_segment(vertical, bx0, by, ty)
+            right = _has_matching_vertical_segment(vertical, bx1, by, ty)
+            if left and right:
+                boxes.append((round(bx0, 1), round(by, 1), round(w, 1), round(h, 1)))
+    return boxes
+
+
+def _has_matching_vertical_segment(
+    segments: list[tuple[float, float, float, float]],
+    x: float,
+    y0: float,
+    y1: float,
+) -> bool:
+    for segment in segments:
+        sx, sy0, _sx2, sy1 = segment
+        if abs(sx - x) <= 1.0 and abs(sy0 - y0) <= 1.0 and abs(sy1 - y1) <= 1.0:
+            return True
+    return False
 
 
 def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
@@ -1974,6 +2197,9 @@ def _looks_like_readable_label(label: str) -> bool:
 def _is_signature_label(label: str) -> bool:
     if not _looks_like_text(label):
         return False
+    first_word_match = re.search(r"[A-Za-z\u0590-\u05FF]+", label.casefold())
+    if first_word_match and first_word_match.group(0) in HEBREW_SIGNATURE_LEADING_WORDS:
+        return True
     lowered = label.lower()
     return any(keyword in lowered for keyword in SIGNATURE_KEYWORDS)
 

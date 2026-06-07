@@ -10,14 +10,18 @@ from pikepdf import Dictionary, Name
 from xdp_form_cli.auto_form import (
     AutoFieldSpec,
     AzureLayoutResult,
+    BBoxWord,
     DetectedBox,
     MAX_FIELD_HEIGHT_PT,
+    SignatureContext,
     TextAnchor,
     build_auto_client_form,
     build_auto_form,
     detect_field_specs,
     _apply_signature_context_rows,
     _bbox_checkbox_boxes_from_xml,
+    _bbox_has_signature_label_near_box,
+    _bbox_underline_boxes_from_words,
     _bbox_underline_boxes_from_xml,
     _checkbox_base_name,
     _filter_specs_by_original_content,
@@ -46,6 +50,20 @@ def _write_boxed_pdf(path: Path) -> Path:
     return path
 
 
+def _write_signature_underline_over_rejected_geo_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(600, 400))
+    content = (
+        b"BT /F1 10 Tf 440 130 Td (Signature) Tj ET\n"
+        b"BT /F1 10 Tf 400 100 Td (____________________) Tj ET\n"
+        b"50 96 500 14 re S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
 def test_detect_field_specs_finds_boxes(tmp_path: Path) -> None:
     source = _write_boxed_pdf(tmp_path / "boxed.pdf")
     specs = detect_field_specs(source)
@@ -63,10 +81,132 @@ def test_detect_field_specs_marks_signature_as_image(tmp_path: Path) -> None:
     assert by_y[340].field_type == "text"
 
 
+def test_detect_field_specs_keeps_signature_underline_when_rejected_geo_overlaps(tmp_path: Path) -> None:
+    source = _write_signature_underline_over_rejected_geo_pdf(tmp_path / "signature-under-rejected-geo.pdf")
+
+    specs = detect_field_specs(source)
+
+    signature_specs = [spec for spec in specs if spec.field_type == "image"]
+    assert len(signature_specs) == 1
+    assert signature_specs[0].x >= 390
+    assert signature_specs[0].w >= 100
+
+
 def test_signature_label_matches_signature_keyword_anywhere() -> None:
     assert _is_signature_label("Signature") is True
     assert _is_signature_label("Signature date") is True
     assert _is_signature_label("Date signature") is True
+
+
+def test_signature_label_matches_hebrew_signature_words_at_start() -> None:
+    assert _is_signature_label("\u05d7\u05ea\u05d9\u05de\u05d4 \u05d4\u05e2\u05de\u05d9\u05ea") is True
+    assert _is_signature_label("\u05d7\u05ea\u05d9\u05de\u05ea \u05d1\u05e2\u05dc \u05e8\u05d9\u05e9\u05d9\u05d5\u05df") is True
+    assert _is_signature_label("\u05d7\u05ea\u05d9\u05de\u05d5\u05ea \u05d4\u05e6\u05d3\u05d3\u05d9\u05dd") is True
+    assert _is_signature_label("\u05d7\u05d5\u05ea\u05dd \u05d4\u05d7\u05d1\u05e8\u05d4") is True
+    assert _is_signature_label("\u05d7\u05d5\u05ea\u05de\u05ea \u05d4\u05d7\u05d1\u05e8\u05d4") is True
+
+
+def test_bbox_signature_label_near_box_matches_reversed_hebrew_signature_word() -> None:
+    box = DetectedBox(page=1, x=393.8, y=97.5, w=110.5, h=12.0)
+    words = [
+        BBoxWord(page=1, page_height=842.0, text="\u05d7\u05d5\u05e7\u05dc\u05d4", x0=443.8, y0=705.4, x1=470.8, y1=717.7),
+        BBoxWord(page=1, page_height=842.0, text="\u05ea\u05de\u05d9\u05ea\u05d7", x0=473.8, y0=705.4, x1=503.9, y1=717.7),
+    ]
+
+    assert _bbox_has_signature_label_near_box(box, words) is True
+
+
+def test_bbox_signature_label_uses_hebrew_direction_for_same_line() -> None:
+    left_line = DetectedBox(page=1, x=100.0, y=700.0, w=120.0, h=12.0)
+    right_line = DetectedBox(page=1, x=320.0, y=700.0, w=120.0, h=12.0)
+    signature_word = BBoxWord(
+        page=1,
+        page_height=842.0,
+        text="\u05d4\u05de\u05d9\u05ea\u05d7",
+        x0=250.0,
+        y0=130.0,
+        x1=300.0,
+        y1=142.0,
+    )
+
+    assert _bbox_has_signature_label_near_box(left_line, [signature_word]) is True
+    assert _bbox_has_signature_label_near_box(right_line, [signature_word]) is False
+
+
+def test_bbox_signature_label_uses_english_direction_for_same_line() -> None:
+    left_line = DetectedBox(page=1, x=100.0, y=700.0, w=120.0, h=12.0)
+    right_line = DetectedBox(page=1, x=320.0, y=700.0, w=120.0, h=12.0)
+    signature_word = BBoxWord(
+        page=1,
+        page_height=842.0,
+        text="Signature",
+        x0=250.0,
+        y0=130.0,
+        x1=300.0,
+        y1=142.0,
+    )
+
+    assert _bbox_has_signature_label_near_box(left_line, [signature_word]) is False
+    assert _bbox_has_signature_label_near_box(right_line, [signature_word]) is True
+
+
+def test_pure_underline_below_signature_label_is_detected_as_fillable() -> None:
+    words = [
+        BBoxWord(page=1, page_height=842.0, text="\u05d7\u05d5\u05e7\u05dc\u05d4", x0=443.8, y0=705.4, x1=470.8, y1=717.7),
+        BBoxWord(page=1, page_height=842.0, text="\u05ea\u05de\u05d9\u05ea\u05d7", x0=473.8, y0=705.4, x1=503.9, y1=717.7),
+        BBoxWord(page=1, page_height=842.0, text="__________________", x0=393.8, y0=734.0, x1=504.3, y1=738.0),
+    ]
+
+    boxes_by_page = _bbox_underline_boxes_from_words({1: words})
+
+    assert boxes_by_page[1] == [DetectedBox(page=1, x=393.8, y=104.0, w=110.5, h=12.0)]
+
+
+def test_signature_context_converts_single_nearby_text_field_to_image() -> None:
+    specs = [
+        AutoFieldSpec(page=3, name="txtField", field_type="text", x=393.8, y=97.5, w=110.5, h=12.0, label="15"),
+    ]
+
+    updated = _apply_signature_context_rows(
+        specs,
+        [SignatureContext(page=3, x0=443.8, x1=503.9, y=124.3, direction="rtl")],
+    )
+
+    assert updated == [
+        AutoFieldSpec(page=3, name="imgField", field_type="image", x=393.8, y=97.5, w=110.5, h=12.0, label="15"),
+    ]
+
+
+def test_signature_context_uses_hebrew_direction_for_same_line() -> None:
+    specs = [
+        AutoFieldSpec(page=3, name="txtLeft", field_type="text", x=100.0, y=100.0, w=120.0, h=12.0),
+        AutoFieldSpec(page=3, name="txtRight", field_type="text", x=320.0, y=100.0, w=120.0, h=12.0),
+    ]
+
+    updated = _apply_signature_context_rows(
+        specs,
+        [SignatureContext(page=3, x0=250.0, x1=300.0, y=100.0, direction="rtl")],
+    )
+
+    by_name = {spec.name: spec for spec in updated}
+    assert by_name["imgLeft"].field_type == "image"
+    assert by_name["txtRight"].field_type == "text"
+
+
+def test_signature_context_uses_english_direction_for_same_line() -> None:
+    specs = [
+        AutoFieldSpec(page=3, name="txtLeft", field_type="text", x=100.0, y=100.0, w=120.0, h=12.0),
+        AutoFieldSpec(page=3, name="txtRight", field_type="text", x=320.0, y=100.0, w=120.0, h=12.0),
+    ]
+
+    updated = _apply_signature_context_rows(
+        specs,
+        [SignatureContext(page=3, x0=250.0, x1=300.0, y=100.0, direction="ltr")],
+    )
+
+    by_name = {spec.name: spec for spec in updated}
+    assert by_name["txtLeft"].field_type == "text"
+    assert by_name["imgRight"].field_type == "image"
 
 
 def test_build_auto_form_strips_xfa_and_places_fields(tmp_path: Path) -> None:
@@ -343,6 +483,35 @@ def test_detect_field_specs_finds_line_drawn_checkboxes(tmp_path: Path) -> None:
     assert specs[0].name.startswith("checkbox")
 
 
+def _write_split_line_checkbox_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    content = (
+        b"BT /F1 10 Tf 50 300 Td (Qualified investor) Tj ET\n"
+        b"120 296 m 132 296 l S\n"
+        b"132 296 m 132 308 l S\n"
+        b"132 308 m 120 308 l S\n"
+        b"120 308 m 120 296 l S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_finds_checkbox_drawn_as_four_separate_lines(tmp_path: Path) -> None:
+    source = _write_split_line_checkbox_pdf(tmp_path / "split_line_checkbox.pdf")
+
+    specs = detect_field_specs(source)
+
+    checkboxes = [spec for spec in specs if spec.field_type == "checkbox"]
+    assert len(checkboxes) == 1
+    assert checkboxes[0].x == 120.0
+    assert checkboxes[0].y == 296.0
+    assert checkboxes[0].w == 12.0
+    assert checkboxes[0].h == 12.0
+
+
 def _write_transformed_line_and_checkbox_pdf(path: Path) -> Path:
     pdf = pikepdf.Pdf.new()
     pdf.add_blank_page(page_size=(300, 400))
@@ -436,6 +605,44 @@ def test_bbox_checkbox_detection_ignores_square_without_text_context() -> None:
     boxes = _bbox_checkbox_boxes_from_xml(xml)
 
     assert boxes == {}
+
+
+def test_bbox_checkbox_detection_accepts_vertical_group_without_text_context() -> None:
+    xml = """
+    <page width="420.000000" height="400.000000">
+      <word xMin="270.000000" yMin="98.000000" xMax="286.000000" yMax="114.000000">\u25a1</word>
+      <word xMin="270.000000" yMin="132.000000" xMax="286.000000" yMax="148.000000">\u25a1</word>
+      <word xMin="270.000000" yMin="166.000000" xMax="286.000000" yMax="182.000000">\u25a1</word>
+    </page>
+    """
+
+    boxes = _bbox_checkbox_boxes_from_xml(xml)
+
+    assert list(boxes) == [1]
+    assert [(box.x, box.y, box.w, box.h) for box in boxes[1]] == [
+        (270.0, 286.0, 16.0, 16.0),
+        (270.0, 252.0, 16.0, 16.0),
+        (270.0, 218.0, 16.0, 16.0),
+    ]
+
+
+def test_bbox_checkbox_detection_accepts_horizontal_group_without_text_context() -> None:
+    xml = """
+    <page width="420.000000" height="400.000000">
+      <word xMin="100.000000" yMin="98.000000" xMax="116.000000" yMax="114.000000">\u25a1</word>
+      <word xMin="132.000000" yMin="98.000000" xMax="148.000000" yMax="114.000000">\u25a1</word>
+      <word xMin="164.000000" yMin="98.000000" xMax="180.000000" yMax="114.000000">\u25a1</word>
+    </page>
+    """
+
+    boxes = _bbox_checkbox_boxes_from_xml(xml)
+
+    assert list(boxes) == [1]
+    assert [(box.x, box.y, box.w, box.h) for box in boxes[1]] == [
+        (100.0, 286.0, 16.0, 16.0),
+        (132.0, 286.0, 16.0, 16.0),
+        (164.0, 286.0, 16.0, 16.0),
+    ]
 
 
 def _write_underlined_heading_pdf(path: Path) -> Path:
