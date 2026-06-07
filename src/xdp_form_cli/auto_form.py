@@ -143,6 +143,50 @@ class ResolvedAutoName:
     method: str
 
 
+GraphicsMatrix = tuple[float, float, float, float, float, float]
+
+
+IDENTITY_GRAPHICS_MATRIX: GraphicsMatrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def _concat_graphics_matrix(left: GraphicsMatrix, right: GraphicsMatrix) -> GraphicsMatrix:
+    la, lb, lc, ld, le, lf = left
+    ra, rb, rc, rd, re_, rf = right
+    return (
+        la * ra + lc * rb,
+        lb * ra + ld * rb,
+        la * rc + lc * rd,
+        lb * rc + ld * rd,
+        la * re_ + lc * rf + le,
+        lb * re_ + ld * rf + lf,
+    )
+
+
+def _transform_point(matrix: GraphicsMatrix, x: float, y: float) -> tuple[float, float]:
+    a, b, c, d, e, f = matrix
+    return (a * x + c * y + e, b * x + d * y + f)
+
+
+def _transform_rect(
+    matrix: GraphicsMatrix,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+) -> tuple[float, float, float, float]:
+    points = (
+        _transform_point(matrix, x, y),
+        _transform_point(matrix, x + w, y),
+        _transform_point(matrix, x + w, y + h),
+        _transform_point(matrix, x, y + h),
+    )
+    xs = [px for px, _ in points]
+    ys = [py for _, py in points]
+    min_x = min(xs)
+    min_y = min(ys)
+    return (min_x, min_y, max(xs) - min_x, max(ys) - min_y)
+
+
 def build_auto_form(
     source: str | Path,
     output_path: str | Path,
@@ -1245,15 +1289,37 @@ def _detect_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[Detected
     clip_pending: list[tuple[float, float, float, float]] = []
     last_clip_rects: list[tuple[float, float, float, float]] = []
     current_path: list[tuple[float, float]] = []
+    graphics_matrix = IDENTITY_GRAPHICS_MATRIX
+    graphics_stack: list[GraphicsMatrix] = []
 
     for token in pikepdf.parse_content_stream(page):
         op = str(token.operator)
 
-        if op == "re":
+        if op == "q":
+            graphics_stack.append(graphics_matrix)
+        elif op == "Q":
+            graphics_matrix = graphics_stack.pop() if graphics_stack else IDENTITY_GRAPHICS_MATRIX
+            current_path = []
+        elif op == "cm" and len(token.operands) == 6:
+            try:
+                matrix: GraphicsMatrix = (
+                    float(token.operands[0]),
+                    float(token.operands[1]),
+                    float(token.operands[2]),
+                    float(token.operands[3]),
+                    float(token.operands[4]),
+                    float(token.operands[5]),
+                )
+            except (TypeError, ValueError):
+                continue
+            graphics_matrix = _concat_graphics_matrix(graphics_matrix, matrix)
+
+        elif op == "re":
             try:
                 x, y, w, h = (float(v) for v in token.operands)
             except (TypeError, ValueError):
                 continue
+            x, y, w, h = _transform_rect(graphics_matrix, x, y, w, h)
             if w < 0: x, w = x + w, -w
             if h < 0: y, h = y + h, -h
             if (MIN_CHECKBOX_PT <= w <= MAX_CHECKBOX_PT
@@ -1267,6 +1333,7 @@ def _detect_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[Detected
             except (TypeError, ValueError):
                 current_path = []
                 continue
+            x, y = _transform_point(graphics_matrix, x, y)
             current_path = [(x, y)]
         elif op == "l" and len(token.operands) == 2:
             if not current_path:
@@ -1276,6 +1343,7 @@ def _detect_checkbox_boxes(page: pikepdf.Page, page_index: int) -> list[Detected
             except (TypeError, ValueError):
                 current_path = []
                 continue
+            x, y = _transform_point(graphics_matrix, x, y)
             current_path.append((x, y))
         elif op == "h":
             # The stroke/fill operator will consume the path. Keeping the
@@ -1393,12 +1461,33 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
     last_clip_rects: list[tuple[float, float, float, float]] = []
     current_path: list[tuple[float, float]] = []
     fill_is_white = False  # PDF default fill colour is black
+    graphics_matrix = IDENTITY_GRAPHICS_MATRIX
+    graphics_stack: list[GraphicsMatrix] = []
 
     for token in pikepdf.parse_content_stream(page):
         op = str(token.operator)
 
+        if op == "q":
+            graphics_stack.append(graphics_matrix)
+        elif op == "Q":
+            graphics_matrix = graphics_stack.pop() if graphics_stack else IDENTITY_GRAPHICS_MATRIX
+            current_path = []
+        elif op == "cm" and len(token.operands) == 6:
+            try:
+                matrix: GraphicsMatrix = (
+                    float(token.operands[0]),
+                    float(token.operands[1]),
+                    float(token.operands[2]),
+                    float(token.operands[3]),
+                    float(token.operands[4]),
+                    float(token.operands[5]),
+                )
+            except (TypeError, ValueError):
+                continue
+            graphics_matrix = _concat_graphics_matrix(graphics_matrix, matrix)
+
         # Track fill colour so we can skip shaded header rows.
-        if op == "g":  # grayscale fill: 1.0 = white
+        elif op == "g":  # grayscale fill: 1.0 = white
             try:
                 fill_is_white = float(token.operands[0]) > 0.9
             except (TypeError, ValueError, IndexError):
@@ -1423,6 +1512,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
                 x, y, w, h = (float(v) for v in token.operands)
             except (TypeError, ValueError):
                 continue
+            x, y, w, h = _transform_rect(graphics_matrix, x, y, w, h)
             if w < 0:
                 x, w = x + w, -w
             if h < 0:
@@ -1440,6 +1530,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             except (TypeError, ValueError):
                 current_path = []
                 continue
+            x, y = _transform_point(graphics_matrix, x, y)
             current_path = [(x, y)]
         elif op == "l" and len(token.operands) == 2:
             if not current_path:
@@ -1449,6 +1540,7 @@ def _detect_boxes(page: pikepdf.Page, page_index: int) -> list[DetectedBox]:
             except (TypeError, ValueError):
                 current_path = []
                 continue
+            x, y = _transform_point(graphics_matrix, x, y)
             current_path.append((x, y))
         elif op == "h":
             pass
@@ -1616,6 +1708,8 @@ def _is_fillable_text_box(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
     the blank area, and reject candidates with paragraph-like content directly
     under the line.
     """
+    if _looks_like_full_row_separator(box):
+        return False
     if _has_conflicting_text_content(box, anchors):
         return False
     return _has_fillable_label_context(box, anchors)
@@ -1629,12 +1723,54 @@ def _filter_fillable_text_boxes(
     accepted = list(direct)
 
     for box in boxes:
-        if box in direct or _has_conflicting_text_content(box, anchors):
+        if box in direct or _looks_like_full_row_separator(box) or _has_conflicting_text_content(box, anchors):
             continue
         if _has_fillable_row_peer(box, direct, boxes, anchors):
             accepted.append(box)
+            continue
+        if _has_immediate_above_label_context(box, anchors):
+            accepted.append(box)
 
-    return accepted
+    for box in boxes:
+        if box in accepted or _looks_like_full_row_separator(box) or _has_conflicting_text_content(box, anchors):
+            continue
+        if _is_blank_repeating_table_input_cell(box, boxes, anchors):
+            accepted.append(box)
+
+    return _dedupe_similar_boxes(accepted)
+
+
+def _dedupe_similar_boxes(boxes: list[DetectedBox]) -> list[DetectedBox]:
+    unique: list[DetectedBox] = []
+    for box in boxes:
+        if any(_boxes_are_near_duplicates(box, existing) for existing in unique):
+            continue
+        unique.append(box)
+    return unique
+
+
+def _boxes_are_near_duplicates(a: DetectedBox, b: DetectedBox) -> bool:
+    if a.page != b.page:
+        return False
+    if abs(a.x - b.x) > 2 or abs(a.y - b.y) > 2:
+        return False
+    if abs(a.w - b.w) > 3 or abs(a.h - b.h) > 3:
+        return False
+    return _box_overlap_ratio(a, b) >= 0.9
+
+
+def _box_overlap_ratio(a: DetectedBox, b: DetectedBox) -> float:
+    x0 = max(a.x, b.x)
+    y0 = max(a.y, b.y)
+    x1 = min(a.x + a.w, b.x + b.w)
+    y1 = min(a.y + a.h, b.y + b.h)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    intersection = (x1 - x0) * (y1 - y0)
+    smaller_area = min(a.w * a.h, b.w * b.h)
+    if smaller_area <= 0:
+        return 0.0
+    return intersection / smaller_area
 
 
 def _has_conflicting_text_content(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
@@ -1647,6 +1783,10 @@ def _has_conflicting_text_content(box: DetectedBox, anchors: list[TextAnchor]) -
 
     below = _below_label_anchors(box, anchors)
     return bool(below) and not _looks_like_short_below_label(below)
+
+
+def _looks_like_full_row_separator(box: DetectedBox) -> bool:
+    return box.h <= UNDERLINE_FIELD_HEIGHT_PT and box.w >= 450
 
 
 def _has_fillable_label_context(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
@@ -1695,6 +1835,63 @@ def _has_fillable_row_peer(
     if not (2 <= len(row) <= 3):
         return False
     return any(peer in direct and peer != box for peer in row)
+
+
+def _has_immediate_above_label_context(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
+    if box.w > 180 or box.h > 20:
+        return False
+    box_top = box.y + box.h
+    for anchor in anchors:
+        if _effective_text_len(anchor.text) == 0 or _looks_like_section_number(anchor.text):
+            continue
+        if not (0 < anchor.y - box_top <= 12):
+            continue
+        if box.x - 10 <= anchor.x <= box.x + box.w + 10:
+            return True
+    return False
+
+
+def _is_blank_repeating_table_input_cell(
+    box: DetectedBox,
+    all_boxes: list[DetectedBox],
+    anchors: list[TextAnchor],
+) -> bool:
+    if box.w > 220 or box.h > 32:
+        return False
+
+    blank_column_cells = [
+        other for other in all_boxes
+        if (
+            other.page == box.page
+            and abs(other.x - box.x) <= 2
+            and abs(other.w - box.w) <= 3
+            and abs(other.h - box.h) <= 6
+            and not _has_conflicting_text_content(other, anchors)
+        )
+    ]
+    if len(blank_column_cells) < 3:
+        return False
+
+    return _row_has_text_table_peer(box, all_boxes, anchors)
+
+
+def _row_has_text_table_peer(
+    box: DetectedBox,
+    all_boxes: list[DetectedBox],
+    anchors: list[TextAnchor],
+) -> bool:
+    row = [
+        other for other in all_boxes
+        if (
+            other.page == box.page
+            and other != box
+            and abs(other.y - box.y) <= 3
+            and abs(other.h - box.h) <= 6
+        )
+    ]
+    if not row:
+        return False
+    return any(_has_conflicting_text_content(peer, anchors) for peer in row)
 
 
 def _below_label_anchors(box: DetectedBox, anchors: list[TextAnchor]) -> list[TextAnchor]:
@@ -1777,8 +1974,14 @@ def _looks_like_readable_label(label: str) -> bool:
 def _is_signature_label(label: str) -> bool:
     if not _looks_like_text(label):
         return False
-    lowered = label.lower()
-    return any(keyword in lowered for keyword in SIGNATURE_KEYWORDS)
+    words = re.findall(r"[A-Za-z\u0590-\u05FF]+", label.casefold())
+    if not words:
+        return False
+    first_word = words[0]
+    english_signature_words = {"signature", "sign"}
+    if first_word in english_signature_words:
+        return True
+    return first_word in HEBREW_SIGNATURE_KEYWORDS
 
 
 def _looks_like_text(label: str) -> bool:

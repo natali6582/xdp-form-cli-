@@ -21,6 +21,7 @@ from xdp_form_cli.auto_form import (
     _bbox_underline_boxes_from_xml,
     _checkbox_base_name,
     _filter_specs_by_original_content,
+    _is_signature_label,
     _matches_signature_context_word,
     _nearest_label,
     write_field_csv,
@@ -60,6 +61,15 @@ def test_detect_field_specs_marks_signature_as_image(tmp_path: Path) -> None:
     by_y = {round(s.y): s for s in specs}
     assert by_y[240].field_type == "image"
     assert by_y[340].field_type == "text"
+
+
+def test_signature_label_requires_signature_as_first_word() -> None:
+    assert _is_signature_label("Signature") is True
+    assert _is_signature_label("Signature date") is True
+    assert _is_signature_label("Date signature") is False
+    assert _is_signature_label("חתימה העמית") is True
+    assert _is_signature_label("חתימת בעל רישיון") is True
+    assert _is_signature_label("תאריך חתימה") is False
 
 
 def test_build_auto_form_strips_xfa_and_places_fields(tmp_path: Path) -> None:
@@ -336,6 +346,39 @@ def test_detect_field_specs_finds_line_drawn_checkboxes(tmp_path: Path) -> None:
     assert specs[0].name.startswith("checkbox")
 
 
+def _write_transformed_line_and_checkbox_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    content = (
+        b"BT /F1 10 Tf 50 300 Td (Amount) Tj ET\n"
+        b"BT /F1 10 Tf 50 260 Td (Independent) Tj ET\n"
+        b"q 0.1 0 0 0.1 120 296 cm 0 0 m 700 0 l S Q\n"
+        b"q 0.1 0 0 0.1 120 256 cm 0 0 m 120 0 l 120 120 l 0 120 l h S Q\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_applies_graphics_transform_to_lines_and_checkboxes(tmp_path: Path) -> None:
+    source = _write_transformed_line_and_checkbox_pdf(tmp_path / "transformed.pdf")
+
+    specs = detect_field_specs(source)
+
+    text_fields = [spec for spec in specs if spec.field_type == "text"]
+    checkboxes = [spec for spec in specs if spec.field_type == "checkbox"]
+    assert len(text_fields) == 1
+    assert text_fields[0].x == 120.0
+    assert text_fields[0].y == 296.0
+    assert text_fields[0].w == 70.0
+    assert len(checkboxes) == 1
+    assert checkboxes[0].x == 120.0
+    assert checkboxes[0].y == 256.0
+    assert checkboxes[0].w == 12.0
+    assert checkboxes[0].h == 12.0
+
+
 def _write_glyph_checkbox_pdf(path: Path) -> Path:
     pdf = pikepdf.Pdf.new()
     pdf.add_blank_page(page_size=(300, 400))
@@ -441,6 +484,27 @@ def test_detect_field_specs_ignores_table_row_separators_with_content_below(tmp_
     assert specs == []
 
 
+def _write_full_width_separator_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(595, 420))
+    content = (
+        b"40 300 510 0.8 re S\n"
+        b"BT /F1 10 Tf 220 288 Td (Section note) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_ignores_full_width_section_separators(tmp_path: Path) -> None:
+    source = _write_full_width_separator_pdf(tmp_path / "full_width_separator.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert specs == []
+
+
 def _write_table_cell_with_adjacent_column_text_pdf(path: Path) -> Path:
     pdf = pikepdf.Pdf.new()
     pdf.add_blank_page(page_size=(380, 420))
@@ -463,6 +527,64 @@ def test_detect_field_specs_ignores_table_cells_with_busy_adjacent_text(tmp_path
     specs = detect_field_specs(source)
 
     assert specs == []
+
+
+def _write_short_blank_cell_with_label_above_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(360, 420))
+    content = (
+        b"BT /F1 10 Tf 105 318 Td (Management fee %) Tj ET\n"
+        b"90 300 130 12 re S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_keeps_short_blank_cell_with_label_immediately_above(tmp_path: Path) -> None:
+    source = _write_short_blank_cell_with_label_above_pdf(tmp_path / "label_above_cell.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert [(spec.x, spec.y, spec.w, spec.h) for spec in specs] == [(90.0, 300.0, 130.0, 12.0)]
+
+
+def _write_blank_table_input_column_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(420, 420))
+    content = (
+        b"BT /F1 10 Tf 60 350 Td (Allocation %) Tj ET\n"
+        b"BT /F1 10 Tf 170 350 Td (Investment route) Tj ET\n"
+        b"BT /F1 10 Tf 315 350 Td (Code) Tj ET\n"
+        b"40 320 110 18 re S 150 320 150 18 re S 300 320 60 18 re S\n"
+        b"40 302 110 18 re S 150 302 150 18 re S 300 302 60 18 re S\n"
+        b"40.4 302 110 18 re S\n"
+        b"40 284 110 18 re S 150 284 150 18 re S 300 284 60 18 re S\n"
+        b"BT /F1 10 Tf 170 326 Td (General track) Tj ET\n"
+        b"BT /F1 10 Tf 315 326 Td (962) Tj ET\n"
+        b"BT /F1 10 Tf 170 308 Td (Shares track) Tj ET\n"
+        b"BT /F1 10 Tf 315 308 Td (963) Tj ET\n"
+        b"BT /F1 10 Tf 170 290 Td (Bond track) Tj ET\n"
+        b"BT /F1 10 Tf 315 290 Td (972) Tj ET\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_keeps_blank_repeating_table_input_column(tmp_path: Path) -> None:
+    source = _write_blank_table_input_column_pdf(tmp_path / "blank_table_column.pdf")
+
+    specs = detect_field_specs(source)
+
+    text_fields = [spec for spec in specs if spec.field_type == "text"]
+    assert [(field.x, field.y, field.w, field.h) for field in text_fields] == [
+        (40.0, 320.0, 110.0, 18.0),
+        (40.0, 302.0, 110.0, 18.0),
+        (40.0, 284.0, 110.0, 18.0),
+    ]
 
 
 def _write_same_line_underline_pdf(path: Path, label_before: bool) -> Path:
