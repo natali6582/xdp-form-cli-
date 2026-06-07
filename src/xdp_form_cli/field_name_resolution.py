@@ -80,9 +80,10 @@ class FieldNameResolver:
         if alias and alias.startswith(prefix):
             return FieldNameResolution(alias, matched=True, method="livecycle-mapping")
 
-        label_alias = self._label_aliases.get(_normalize_label(label))
-        if label_alias and label_alias.startswith(prefix):
-            return FieldNameResolution(label_alias, matched=True, method="semantic-label-map")
+        for label_key in _label_lookup_keys(label):
+            label_alias = self._label_aliases.get(label_key)
+            if label_alias and label_alias.startswith(prefix):
+                return FieldNameResolution(label_alias, matched=True, method="semantic-label-map")
 
         label_match = self._resolve_by_unique_token_match(label, prefix=prefix)
         if label_match is not None:
@@ -329,6 +330,32 @@ def _normalize_label(label: str) -> str:
     normalized = re.sub(r"[\s:：־–—_-]+", " ", label.strip().casefold())
     normalized = re.sub(r"[^\w\u0590-\u05FF ]+", "", normalized)
     return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _label_lookup_keys(label: str) -> list[str]:
+    keys: list[str] = []
+    _add_label_lookup_key(keys, label)
+
+    if any("\u0590" <= char <= "\u05FF" for char in label):
+        _add_label_lookup_key(keys, label[::-1])
+
+    return keys
+
+
+def _add_label_lookup_key(keys: list[str], label: str) -> None:
+    normalized = _normalize_label(label)
+    if normalized and normalized not in keys:
+        keys.append(normalized)
+
+    parts = normalized.split()
+    if len(parts) != 1:
+        return
+    word = parts[0]
+    if len(word) <= 3 or word[0] not in {"\u05d1", "\u05d4", "\u05dc"}:
+        return
+    without_prefix = word[1:]
+    if without_prefix and without_prefix not in keys:
+        keys.append(without_prefix)
 
 
 def _cell(row: list[str], index: int) -> str:

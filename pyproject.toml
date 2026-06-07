@@ -24,6 +24,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+xdp_form_cli = ["resources/*.csv", "resources/*.xlsx"]
+
 [project.optional-dependencies]
 placement = ["Pillow>=10.0.0", "numpy>=1.24.0"]
 azure = ["azure-ai-documentintelligence>=1.0.0", "azure-core>=1.30.0"]

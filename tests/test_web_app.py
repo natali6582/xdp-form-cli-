@@ -26,6 +26,19 @@ def _write_uploadable_pdf(path: Path) -> Path:
     return path
 
 
+def _write_uploadable_plan_t_alias_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(320, 420))
+    content = (
+        b"BT /F1 10 Tf 40 320 Td (Name Of Account Owner) Tj ET\n"
+        b"170 312 120 14 re S\n"
+    )
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(content)
+    pdf.save(path)
+    return path
+
+
 def test_index_renders_upload_form(tmp_path: Path) -> None:
     app = create_app({"TESTING": True, "JOB_STORAGE_DIR": tmp_path})
     client = app.test_client()
@@ -106,6 +119,28 @@ def test_upload_builds_pdf_and_csv_and_exposes_downloads(tmp_path: Path) -> None
     assert pdf_download.headers["Content-Type"] == "application/pdf"
     assert csv_download.status_code == 200
     assert "page,name,type,x,y,w,h,value" in csv_download.get_data(as_text=True)
+
+
+def test_upload_uses_packaged_plan_t_defaults_for_field_names(tmp_path: Path) -> None:
+    source = _write_uploadable_plan_t_alias_pdf(tmp_path / "source.pdf")
+    app = create_app({"TESTING": True, "JOB_STORAGE_DIR": tmp_path / "jobs"})
+    client = app.test_client()
+
+    with source.open("rb") as handle:
+        response = client.post(
+            "/upload",
+            data={"file": (handle, source.name)},
+            content_type="multipart/form-data",
+        )
+
+    assert response.status_code == 200
+    job_dir = next((tmp_path / "jobs").iterdir())
+    csv_download = client.get(f"/downloads/{job_dir.name}/csv")
+
+    assert csv_download.status_code == 200
+    csv_text = csv_download.get_data(as_text=True)
+    assert "txtAccountName" in csv_text
+    assert "txtNameOfAccountOwner" not in csv_text
 
 
 def test_upload_ignores_unexpected_template_file_and_uses_single_pdf_flow(tmp_path: Path) -> None:

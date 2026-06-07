@@ -27,7 +27,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass
+from importlib.resources import as_file, files
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -39,6 +41,11 @@ from xdp_form_cli.acroform_builder import create_acroform_pdf
 from xdp_form_cli.field_name_resolution import FieldNameResolver
 from xdp_form_cli.field_validation import ParsedField, _validate_original_content_overlap
 from xdp_form_cli.xfa_stripper import pdf_has_xfa, strip_xfa
+
+
+DEFAULT_PLAN_T_FIELDS_RESOURCE = "plan_t_fields.csv"
+DEFAULT_PLAN_T_MAPPING_RESOURCE = "livecycle_plan_t_mapping.xlsx"
+DEFAULT_PLAN_T_SEMANTIC_RESOURCE = "plan_t_semantic_labels.csv"
 
 
 # Words that mark a box as a signature (image) field, in English and Hebrew.
@@ -279,7 +286,7 @@ def _build_detected_form(
             stripped,
             enabled=_should_use_azure_document_intelligence(use_azure_document_intelligence),
         )
-        field_name_resolver = FieldNameResolver.from_files(
+        field_name_resolver = _load_field_name_resolver(
             fields_list_csv=fields_list_path,
             mapping_xlsx=field_mapping_path,
             semantic_map_csv=semantic_map_path,
@@ -329,6 +336,44 @@ def _summarize_specs(specs: list[AutoFieldSpec], *, warnings: tuple[str, ...] = 
     return AutoClientFormSummary(type_counts=dict(sorted(counts.items())), warnings=warnings)
 
 
+def _load_field_name_resolver(
+    *,
+    fields_list_csv: str | Path | None,
+    mapping_xlsx: str | Path | None,
+    semantic_map_csv: str | Path | None,
+) -> FieldNameResolver | None:
+    """Load explicit Plan-T mapping files, falling back to packaged defaults.
+
+    Render and other deployed environments do not have the user's OneDrive
+    files, so the canonical Plan-T field list and safe LiveCycle aliases are
+    shipped as package resources.
+    """
+    with ExitStack() as stack:
+        using_packaged_fields = fields_list_csv is None
+        if fields_list_csv is None:
+            fields_list_csv = _packaged_resource_path(stack, DEFAULT_PLAN_T_FIELDS_RESOURCE)
+        if mapping_xlsx is None:
+            mapping_xlsx = _packaged_resource_path(stack, DEFAULT_PLAN_T_MAPPING_RESOURCE)
+        if semantic_map_csv is None and using_packaged_fields:
+            semantic_map_csv = _packaged_resource_path(stack, DEFAULT_PLAN_T_SEMANTIC_RESOURCE)
+
+        return FieldNameResolver.from_files(
+            fields_list_csv=fields_list_csv,
+            mapping_xlsx=mapping_xlsx,
+            semantic_map_csv=semantic_map_csv,
+        )
+
+
+def _packaged_resource_path(stack: ExitStack, name: str) -> Path | None:
+    try:
+        resource = files("xdp_form_cli.resources").joinpath(name)
+        if not resource.is_file():
+            return None
+        return Path(stack.enter_context(as_file(resource)))
+    except (FileNotFoundError, ModuleNotFoundError):
+        return None
+
+
 def _field_name_resolution_warnings(
     specs: list[AutoFieldSpec],
     field_name_resolver: FieldNameResolver | None,
@@ -370,6 +415,7 @@ def detect_field_specs(
     with pikepdf.Pdf.open(str(pdf_path)) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
             anchors = _extract_text_anchors(page)
+            anchors.extend(_bbox_text_anchors_from_words(bbox_words_by_page.get(page_index, [])))
             if azure_layout is not None:
                 anchors.extend(azure_layout.anchors_by_page.get(page_index, []))
             geo_boxes = _detect_boxes(page, page_index)
@@ -1071,6 +1117,21 @@ def _bbox_words_by_page_from_xml(xml_text: str) -> dict[int, list[BBoxWord]]:
             )
         )
     return words_by_page
+
+
+def _bbox_text_anchors_from_words(words: list[BBoxWord]) -> list[TextAnchor]:
+    anchors: list[TextAnchor] = []
+    for word in words:
+        text = word.text.strip()
+        if not text or _text_is_fill_line(text):
+            continue
+        anchors.append(TextAnchor(text, word.x0, word.page_height - word.y1))
+    return anchors
+
+
+def _text_is_fill_line(text: str) -> bool:
+    longest_underscore = max((len(match.group(0)) for match in re.finditer(r"_+", text)), default=0)
+    return longest_underscore >= 8 and longest_underscore / max(len(text), 1) >= 0.45
 
 
 def _bbox_word_checkbox_box(word: BBoxWord) -> DetectedBox | None:
@@ -2164,6 +2225,8 @@ def _nearest_label(box: DetectedBox, anchors: list[TextAnchor]) -> str:
     for anchor in anchors:
         if not _looks_like_readable_label(anchor.text):
             continue
+        if _looks_like_section_number(anchor.text):
+            continue
         below_gap = box.y - anchor.y
         if 0 < below_gap <= 28 and box.x - 10 <= anchor.x <= box.x + box.w + 10:
             score = below_gap + abs(anchor.x - box_cx) * 0.1
@@ -2271,6 +2334,14 @@ def _resolve_auto_field_name(
             field_name_resolver.unique_name(generated_resolution.name, used_names),
             matched=True,
             method=generated_resolution.method,
+        )
+
+    if field_type.lower() in {"image", "img"} and field_name_resolver.is_known_name("imgPersonSignature"):
+        _reserve_unique_name(base, generated_count, used_names)
+        return ResolvedAutoName(
+            field_name_resolver.unique_name("imgPersonSignature", used_names),
+            matched=True,
+            method="signature-default",
         )
 
     return ResolvedAutoName(

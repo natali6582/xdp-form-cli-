@@ -70,6 +70,46 @@ def test_semantic_label_map_resolves_hebrew_or_flat_pdf_labels(tmp_path: Path) -
     assert resolver.resolve("txtTin", field_type="text", label="TIN").name == "txtPersonITIN"
 
 
+def test_semantic_label_map_resolves_reversed_hebrew_pdf_labels(tmp_path: Path) -> None:
+    label = "\u05d7\u05ea\u05d9\u05de\u05d4"
+    reversed_label = label[::-1]
+    semantic_map = tmp_path / "semantic.csv"
+    semantic_map.write_text(
+        f"label,field_name\n{label},imgPersonSignature\n",
+        encoding="utf-8",
+    )
+    known = {"imgPersonSignature"}
+
+    aliases = load_semantic_label_aliases(semantic_map, known)
+    resolver = FieldNameResolver(known, label_aliases=aliases)
+
+    resolution = resolver.resolve("imgField", field_type="image", label=reversed_label)
+
+    assert resolution.name == "imgPersonSignature"
+    assert resolution.matched
+    assert resolution.method == "semantic-label-map"
+
+
+def test_semantic_label_map_resolves_reversed_hebrew_label_with_prefix(tmp_path: Path) -> None:
+    label = "\u05ea\u05d0\u05e8\u05d9\u05da"
+    prefixed_label = "\u05d1" + label
+    semantic_map = tmp_path / "semantic.csv"
+    semantic_map.write_text(
+        f"label,field_name\n{label},txtDate\n",
+        encoding="utf-8",
+    )
+    known = {"txtDate"}
+
+    aliases = load_semantic_label_aliases(semantic_map, known)
+    resolver = FieldNameResolver(known, label_aliases=aliases)
+
+    resolution = resolver.resolve("txtField", field_type="text", label=prefixed_label[::-1])
+
+    assert resolution.name == "txtDate"
+    assert resolution.matched
+    assert resolution.method == "semantic-label-map"
+
+
 def test_semantic_map_can_resolve_generated_field_names(tmp_path: Path) -> None:
     semantic_map = tmp_path / "semantic.csv"
     semantic_map.write_text(
