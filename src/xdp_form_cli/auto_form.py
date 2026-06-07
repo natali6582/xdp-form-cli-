@@ -220,6 +220,7 @@ def build_auto_form(
     csv_path: str | Path | None = None,
     xfa_template_path: str | Path | None = None,
     use_azure_document_intelligence: bool | None = None,
+    overwrite: bool = False,
 ) -> tuple[Path, Path, int]:
     """Build a fillable AcroForm from a URL or local PDF path.
 
@@ -231,6 +232,7 @@ def build_auto_form(
         csv_path=csv_path,
         xfa_template_path=xfa_template_path,
         use_azure_document_intelligence=use_azure_document_intelligence,
+        overwrite=overwrite,
     )
     return output, csv_out, len(specs)
 
@@ -245,6 +247,7 @@ def build_auto_client_form(
     field_mapping_path: str | Path | None = None,
     semantic_map_path: str | Path | None = None,
     mapping_report_path: str | Path | None = None,
+    overwrite: bool = False,
 ) -> tuple[Path, Path, int, AutoClientFormSummary]:
     """Build a client-upload fillable AcroForm and return a detection summary."""
     output, csv_out, specs, warnings = _build_detected_form(
@@ -255,6 +258,7 @@ def build_auto_client_form(
         fields_list_path=fields_list_path,
         field_mapping_path=field_mapping_path,
         semantic_map_path=semantic_map_path,
+        overwrite=overwrite,
     )
     if mapping_report_path is not None:
         write_mapping_report(specs, mapping_report_path)
@@ -271,6 +275,7 @@ def _build_detected_form(
     fields_list_path: str | Path | None = None,
     field_mapping_path: str | Path | None = None,
     semantic_map_path: str | Path | None = None,
+    overwrite: bool = False,
 ) -> tuple[Path, Path, list[AutoFieldSpec], tuple[str, ...]]:
     output = Path(output_path)
     csv_out = Path(csv_path) if csv_path else output.with_suffix(".fields.csv")
@@ -306,7 +311,7 @@ def _build_detected_form(
                 "Supply a field CSV manually and use create-acroform instead."
             )
 
-        write_field_csv(specs, csv_out)
+        write_field_csv(specs, csv_out, overwrite=overwrite)
 
         if xfa_template_path is not None:
             # User supplied an external XFA template: inject fields into it and
@@ -315,7 +320,7 @@ def _build_detected_form(
 
             with_xfa_fields = Path(tmp_dir) / "with_xfa_fields.pdf"
             inject_xfa_fields_from_template(local_source, xfa_template_path, with_xfa_fields, specs)
-            create_acroform_pdf(with_xfa_fields, csv_out, output)
+            create_acroform_pdf(with_xfa_fields, csv_out, output, overwrite=overwrite)
         elif has_xfa:
             # Preserve XFA: inject <field> elements into the template, then add
             # matching AcroForm widgets so both layers carry the same fields.
@@ -323,9 +328,9 @@ def _build_detected_form(
 
             with_xfa_fields = Path(tmp_dir) / "with_xfa_fields.pdf"
             inject_xfa_fields(local_source, with_xfa_fields, specs)
-            create_acroform_pdf(with_xfa_fields, csv_out, output)
+            create_acroform_pdf(with_xfa_fields, csv_out, output, overwrite=overwrite)
         else:
-            create_acroform_pdf(stripped, csv_out, output)
+            create_acroform_pdf(stripped, csv_out, output, overwrite=overwrite)
 
     azure_warnings = azure_layout.warnings if azure_layout is not None else ()
     warnings = (*azure_warnings, *naming_warnings)

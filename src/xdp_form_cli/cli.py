@@ -52,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Path to the new output XDP/XML/PDF file. Must not be the source file.",
     )
+    replace_page.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Overwrite output file if it already exists (a timestamped backup is created automatically).",
+    )
 
     strip_xfa_parser = subparsers.add_parser(
         "strip-xfa",
@@ -72,6 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-validation",
         action="store_true",
         help="With --fields, fail on validation warnings, not only errors.",
+    )
+    strip_xfa_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Overwrite output file if it already exists (a timestamped backup is created automatically).",
     )
 
     auto_form_parser = subparsers.add_parser(
@@ -108,6 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--azure-document-intelligence",
         action="store_true",
         help="Use Azure Document Intelligence prebuilt-layout as an optional OCR/layout fallback.",
+    )
+    auto_form_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Overwrite output file(s) if they already exist (a timestamped backup is created automatically).",
     )
 
     auto_client_form_parser = subparsers.add_parser(
@@ -159,6 +177,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use Azure Document Intelligence prebuilt-layout as an optional OCR/layout fallback.",
     )
+    auto_client_form_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Overwrite output file(s) if they already exist (a timestamped backup is created automatically).",
+    )
 
     azure_report_parser = subparsers.add_parser(
         "azure-layout-report",
@@ -172,6 +196,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     azure_report_parser.add_argument("--output-csv", required=True, help="Path to write the Azure layout CSV report.")
     azure_report_parser.add_argument("--output-json", default=None, help="Optional path to write the Azure layout JSON report.")
+    azure_report_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Overwrite output file(s) if they already exist (a timestamped backup is created automatically).",
+    )
 
     create_acroform = subparsers.add_parser(
         "create-acroform",
@@ -192,6 +222,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--strict-validation",
         action="store_true",
         help="Fail create-acroform on validation warnings, not only errors.",
+    )
+    create_acroform.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Overwrite output file if it already exists (a timestamped backup is created automatically).",
     )
 
     validate_acroform_parser = subparsers.add_parser(
@@ -240,6 +276,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--report",
         default=None,
         help="Optional CSV report path with original and canonical field names.",
+    )
+    convert_fields.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Overwrite output file(s) if they already exist (a timestamped backup is created automatically).",
     )
 
     return parser
@@ -315,10 +357,10 @@ def cmd_replace_page(args: argparse.Namespace) -> int:
         editor.replace_page_from_fragment(args.page, args.fragment)
         colors.step(f"Writing output copy: {args.output}")
         if isinstance(editor, (PdfXfaEditor, PdfAcroFormEditor)):
-            output = editor.save_copy(args.output)
+            output = editor.save_copy(args.output, overwrite=args.overwrite)
             colors.success(f"Saved updated PDF copy: {output}")
         else:
-            output = editor.write_copy(args.output)
+            output = editor.write_copy(args.output, overwrite=args.overwrite)
             colors.success(f"Saved updated XDP/XML copy: {output}")
     finally:
         _close_editor(editor)
@@ -351,7 +393,7 @@ def cmd_strip_xfa(args: argparse.Namespace) -> int:
             if precheck.has_failures(strict=args.strict_validation):
                 raise ValueError("Validation failed. Fix the field specification before creating the PDF.")
 
-            output, count = create_acroform_pdf(str(stripped), args.fields, args.output)
+            output, count = create_acroform_pdf(str(stripped), args.fields, args.output, overwrite=args.overwrite)
             colors.success(f"Saved fillable AcroForm PDF with {count} field(s): {output}")
 
             postcheck = validate_acroform(args.fields, input_pdf=str(stripped), output_pdf=output)
@@ -360,7 +402,7 @@ def cmd_strip_xfa(args: argparse.Namespace) -> int:
                 raise ValueError("Generated PDF failed validation.")
         return 0
 
-    output, had_xfa = strip_xfa(args.input, args.output)
+    output, had_xfa = strip_xfa(args.input, args.output, overwrite=args.overwrite)
     if had_xfa:
         colors.success(f"Removed embedded XFA; saved plain AcroForm PDF copy: {output}")
     else:
@@ -384,6 +426,7 @@ def cmd_auto_form(args: argparse.Namespace) -> int:
         csv_path=args.fields_csv,
         xfa_template_path=args.xfa,
         use_azure_document_intelligence=args.azure_document_intelligence,
+        overwrite=args.overwrite,
     )
     colors.success(f"Detected and placed {count} field(s).")
     colors.success(f"Saved editable field CSV: {csv_path}")
@@ -413,6 +456,7 @@ def cmd_auto_client_form(args: argparse.Namespace) -> int:
         field_mapping_path=args.field_mapping_xlsx,
         semantic_map_path=args.semantic_field_map,
         mapping_report_path=args.mapping_report,
+        overwrite=args.overwrite,
     )
     colors.success(f"Detected and placed {count} field(s).")
     colors.info(
@@ -441,6 +485,7 @@ def cmd_azure_layout_report(args: argparse.Namespace) -> int:
         args.fields_list,
         args.output_csv,
         output_json=args.output_json,
+        overwrite=args.overwrite,
     )
     colors.success(f"Loaded {summary.known_field_count} Plan-T field name(s).")
     colors.success(
@@ -468,7 +513,7 @@ def cmd_create_acroform(args: argparse.Namespace) -> int:
     if precheck.has_failures(strict=args.strict_validation):
         raise ValueError("Validation failed. Fix the field specification before creating the PDF.")
 
-    output, count = create_acroform_pdf(args.input, args.fields, args.output)
+    output, count = create_acroform_pdf(args.input, args.fields, args.output, overwrite=args.overwrite)
     colors.success(f"Saved AcroForm PDF copy with {count} field(s): {output}")
 
     postcheck = validate_acroform(args.fields, input_pdf=args.input, output_pdf=output)
@@ -521,14 +566,14 @@ def cmd_convert_fields(args: argparse.Namespace) -> int:
 
         colors.step(f"Writing output copy: {args.output}")
         if isinstance(editor, (PdfXfaEditor, PdfAcroFormEditor)):
-            output = editor.save_copy(args.output)
+            output = editor.save_copy(args.output, overwrite=args.overwrite)
             colors.success(f"Saved updated PDF copy: {output}")
         else:
-            output = editor.write_copy(args.output)
+            output = editor.write_copy(args.output, overwrite=args.overwrite)
             colors.success(f"Saved updated XDP/XML copy: {output}")
 
         if args.report:
-            report_path = report.write_csv(args.report)
+            report_path = report.write_csv(args.report, overwrite=args.overwrite)
             colors.success(f"Saved conversion report: {report_path}")
     finally:
         _close_editor(editor)

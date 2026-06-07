@@ -168,3 +168,53 @@ A task is complete only when:
 5. The full test suite passes with zero failures.
 6. Code has been refactored for clarity where needed.
 7. No tests were skipped, weakened, deleted, or changed only to hide a failure.
+
+## Security Invariants
+
+The following rules must never be removed or weakened by any future agent or
+developer. Each invariant maps to a specific protection that prevents
+irreversible data loss or security vulnerabilities.
+
+1. **Output-overwrite protection.** `require_safe_output()` from `safe_io.py`
+   must be called before any write operation that could overwrite an existing
+   file. The function raises `FileExistsError` by default; callers may pass
+   `overwrite=True` only when the user has explicitly opted in (e.g.
+   `--overwrite` CLI flag).
+
+2. **Automatic backup on overwrite.** When `overwrite=True` is passed,
+   `backup_if_exists()` must be called immediately after `require_safe_output()`
+   and before writing the new content. This guarantees the old file is always
+   recoverable.
+
+3. **Source-equals-output guard.** Every function that writes from a source
+   file must check `output.resolve() == source.resolve()` and raise
+   `ValueError` before calling `require_safe_output()`. Bypassing this check
+   would silently corrupt the source.
+
+4. **Subprocess timeouts.** All `subprocess.run()` calls must include
+   `timeout=SUBPROCESS_TIMEOUT_SECONDS`. The constant is defined in each
+   module that uses subprocesses (`auto_form.py`, `field_validation.py`).
+
+5. **Subprocess timeout handling.** `subprocess.TimeoutExpired` must be caught
+   alongside `OSError` and `subprocess.CalledProcessError` in every
+   `except` clause that wraps a `subprocess.run()` call. Catching only two of
+   the three leaves a hang path open.
+
+6. **URL download limits.** Any code that downloads a file from a URL must
+   validate the scheme (only `http` and `https`), cap the response at
+   `MAX_DOWNLOAD_BYTES` (50 MB), and verify the PDF magic bytes before
+   accepting the content.
+
+7. **XLSX decompressed-size limit.** Before opening a worksheet entry inside
+   an XLSX archive, check `ZipInfo.file_size` against
+   `MAX_XLSX_DECOMPRESSED_BYTES` (50 MB) and raise `ValueError` if the limit
+   is exceeded. This prevents zip-bomb attacks from exhausting memory.
+
+8. **CLI --overwrite flag required.** Any new CLI subcommand that produces an
+   output file must include a `--overwrite` argument and pass it to the
+   underlying library function. The library function must call
+   `require_safe_output()` with the user-supplied value.
+
+9. **TDD first.** No security invariant or protection may be added, removed,
+   or changed without a failing test written first (RED before GREEN).
+   Tests must prove the protection works, not just that the function exists.

@@ -1491,3 +1491,85 @@ class TestSubprocessTimeoutHardening:
         assert hasattr(auto_form_module, "SUBPROCESS_TIMEOUT_SECONDS")
         assert isinstance(auto_form_module.SUBPROCESS_TIMEOUT_SECONDS, int)
         assert auto_form_module.SUBPROCESS_TIMEOUT_SECONDS > 0
+
+
+# ---------------------------------------------------------------------------
+# CLI --overwrite flag
+# ---------------------------------------------------------------------------
+
+
+class TestCliOverwriteFlag:
+    """The CLI must refuse to overwrite existing output files unless --overwrite is given."""
+
+    def test_auto_form_cli_fails_when_output_exists_without_overwrite(self, tmp_path: Path) -> None:
+        source = _write_boxed_pdf(tmp_path / "boxed.pdf")
+        output = tmp_path / "out.pdf"
+        output.write_bytes(b"%PDF-1.4 placeholder")
+
+        exit_code = main([
+            "auto-form",
+            "--input", str(source),
+            "--output", str(output),
+        ])
+
+        assert exit_code != 0
+
+    def test_auto_form_cli_succeeds_with_overwrite_flag_and_creates_backup(self, tmp_path: Path) -> None:
+        source = _write_boxed_pdf(tmp_path / "boxed.pdf")
+        output = tmp_path / "out.pdf"
+        original_content = b"%PDF-1.4 original"
+        output.write_bytes(original_content)
+
+        exit_code = main([
+            "auto-form",
+            "--input", str(source),
+            "--output", str(output),
+            "--overwrite",
+        ])
+
+        assert exit_code == 0
+        assert output.is_file()
+        backups = list(tmp_path.glob("out.bak-*.pdf"))
+        assert len(backups) == 1
+        assert backups[0].read_bytes() == original_content
+
+    def test_create_acroform_cli_fails_when_output_exists_without_overwrite(
+        self, tmp_path: Path
+    ) -> None:
+        source = _write_boxed_pdf(tmp_path / "source.pdf")
+        csv_path = tmp_path / "fields.csv"
+        specs = detect_field_specs(source)
+        write_field_csv(specs, csv_path)
+        output = tmp_path / "out.pdf"
+        output.write_bytes(b"%PDF-1.4 placeholder")
+
+        exit_code = main([
+            "create-acroform",
+            "--input", str(source),
+            "--fields", str(csv_path),
+            "--output", str(output),
+        ])
+
+        assert exit_code != 0
+
+    def test_create_acroform_cli_succeeds_with_overwrite_flag(self, tmp_path: Path) -> None:
+        source = _write_boxed_pdf(tmp_path / "source.pdf")
+        csv_path = tmp_path / "fields.csv"
+        specs = detect_field_specs(source)
+        write_field_csv(specs, csv_path)
+        output = tmp_path / "out.pdf"
+        original_content = b"%PDF-1.4 original"
+        output.write_bytes(original_content)
+
+        exit_code = main([
+            "create-acroform",
+            "--input", str(source),
+            "--fields", str(csv_path),
+            "--output", str(output),
+            "--overwrite",
+        ])
+
+        assert exit_code == 0
+        assert output.is_file()
+        backups = list(tmp_path.glob("out.bak-*.pdf"))
+        assert len(backups) == 1
