@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from xdp_form_cli.field_truth import FieldMatch, FieldTruth
-from xdp_form_cli.safe_io import backup_if_exists, require_safe_output
 
 
 @dataclass
@@ -16,11 +15,8 @@ class ConversionReport:
     unmatched: int
     details: list[FieldMatch]
 
-    def write_csv(self, output_path: str | Path, *, overwrite: bool = False) -> Path:
+    def write_csv(self, output_path: str | Path) -> Path:
         output = Path(output_path)
-        require_safe_output(output, overwrite=overwrite)
-        if overwrite:
-            backup_if_exists(output)
         with output.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(["original_name", "canonical_name", "matched", "changed", "method"])

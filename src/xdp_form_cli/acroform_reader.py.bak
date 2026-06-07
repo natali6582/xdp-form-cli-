@@ -61,14 +61,10 @@ class PdfAcroFormEditor:
             matches.append(match)
         return matches
 
-    def save_copy(self, output_path: str | Path, *, overwrite: bool = False) -> Path:
+    def save_copy(self, output_path: str | Path) -> Path:
         output = Path(output_path)
         if output.resolve() == self.source_path.resolve():
             raise ValueError("--output must be a new PDF file path, not the source PDF.")
-        from xdp_form_cli.safe_io import backup_if_exists, require_safe_output
-        require_safe_output(output, overwrite=overwrite)
-        if overwrite:
-            backup_if_exists(output)
         self.pdf.save(str(output))
         return output
 

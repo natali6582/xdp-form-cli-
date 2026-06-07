@@ -7,7 +7,6 @@ from shutil import copy2
 from lxml import etree
 
 from xdp_form_cli.field_truth import FieldMatch
-from xdp_form_cli.safe_io import backup_if_exists, require_safe_output
 
 
 XDP_NS = "http://ns.adobe.com/xdp/"
@@ -111,13 +110,10 @@ class XdpEditor:
         self._ensure_fields_font(replacement)
         parent.replace(target_page, replacement)
 
-    def write_copy(self, output_path: str | Path, *, overwrite: bool = False) -> Path:
+    def write_copy(self, output_path: str | Path) -> Path:
         if self.source_path is None:
             raise ValueError("Embedded XML editors cannot write directly to disk.")
         output = Path(output_path)
-        require_safe_output(output, overwrite=overwrite)
-        if overwrite:
-            backup_if_exists(output)
         if output.resolve() != self.source_path.resolve():
             copy2(self.source_path, output)
         output.write_bytes(self.to_bytes())

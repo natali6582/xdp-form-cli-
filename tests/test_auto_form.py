@@ -1441,3 +1441,53 @@ def test_build_auto_client_form_warns_when_azure_credentials_are_missing(
 
     assert count == 2
     assert any("Azure Document Intelligence skipped" in warning for warning in summary.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Subprocess timeout hardening
+# ---------------------------------------------------------------------------
+
+
+class TestSubprocessTimeoutHardening:
+    """Verify that subprocess calls degrade gracefully on timeout instead of hanging."""
+
+    def test_signature_context_returns_empty_list_on_subprocess_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+        import xdp_form_cli.auto_form as auto_form_module
+
+        source = _write_boxed_pdf(tmp_path / "boxed.pdf")
+
+        def _raise_timeout(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=60)
+
+        monkeypatch.setattr(auto_form_module.subprocess, "run", _raise_timeout)
+
+        result = auto_form_module._signature_contexts_from_pdf_text(source)
+
+        assert result == []
+
+    def test_read_bbox_xml_returns_empty_string_on_subprocess_timeout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import subprocess
+        import xdp_form_cli.auto_form as auto_form_module
+
+        source = _write_boxed_pdf(tmp_path / "boxed.pdf")
+
+        def _raise_timeout(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=60)
+
+        monkeypatch.setattr(auto_form_module.subprocess, "run", _raise_timeout)
+
+        result = auto_form_module._read_bbox_xml(source)
+
+        assert result == ""
+
+    def test_subprocess_timeout_constant_is_positive_integer(self) -> None:
+        import xdp_form_cli.auto_form as auto_form_module
+
+        assert hasattr(auto_form_module, "SUBPROCESS_TIMEOUT_SECONDS")
+        assert isinstance(auto_form_module.SUBPROCESS_TIMEOUT_SECONDS, int)
+        assert auto_form_module.SUBPROCESS_TIMEOUT_SECONDS > 0

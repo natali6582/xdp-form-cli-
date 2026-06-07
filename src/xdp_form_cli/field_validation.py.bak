@@ -16,7 +16,6 @@ REQUIRED_COLUMNS = ("page", "name", "type", "x", "y", "w", "h")
 OPTIONAL_COLUMNS = ("value",)
 SUPPORTED_TYPES = {"text", "tx", "textarea", "checkbox", "check", "chk", "image", "img"}
 OVERLAP_RENDER_DPI = 72
-SUBPROCESS_TIMEOUT_SECONDS = 60
 OVERLAP_DARK_PIXEL_THRESHOLD = 90
 OVERLAP_DARK_RATIO_LIMIT = 0.08
 OVERLAP_MIN_DARK_PIXELS = 20
@@ -385,8 +384,8 @@ def _validate_original_content_overlap(input_pdf: str | Path, fields: list[Parse
                 str(prefix),
             ]
             try:
-                subprocess.run(command, check=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT_SECONDS)
-            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                subprocess.run(command, check=True, capture_output=True)
+            except (OSError, subprocess.CalledProcessError) as exc:
                 issues.append(
                     ValidationIssue(
                         "WARN",

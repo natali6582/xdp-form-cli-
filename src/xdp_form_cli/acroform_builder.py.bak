@@ -8,8 +8,6 @@ from pathlib import Path
 import pikepdf
 from pikepdf import Array, Dictionary, Name, String
 
-from xdp_form_cli.safe_io import backup_if_exists, require_safe_output
-
 
 ACROFORM_FONT_RESOURCE = "Arial"
 ACROFORM_DEFAULT_APPEARANCE = f"/{ACROFORM_FONT_RESOURCE} 10 Tf 0 g"
@@ -42,20 +40,11 @@ class AcroFieldSpec:
     value: str = ""
 
 
-def create_acroform_pdf(
-    input_path: str | Path,
-    fields_path: str | Path,
-    output_path: str | Path,
-    *,
-    overwrite: bool = False,
-) -> tuple[Path, int]:
+def create_acroform_pdf(input_path: str | Path, fields_path: str | Path, output_path: str | Path) -> tuple[Path, int]:
     source = Path(input_path)
     output = Path(output_path)
     if output.resolve() == source.resolve():
         raise ValueError("--output must be a new PDF file path, not the source PDF.")
-    require_safe_output(output, overwrite=overwrite)
-    if overwrite:
-        backup_if_exists(output)
 
     specs = load_field_specs(fields_path)
     with pikepdf.Pdf.open(str(source)) as pdf:

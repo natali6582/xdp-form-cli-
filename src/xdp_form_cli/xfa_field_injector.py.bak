@@ -20,7 +20,6 @@ from pikepdf import Array, Dictionary, Name, Stream
 
 from xdp_form_cli.auto_form import AutoFieldSpec
 from xdp_form_cli.pdf_xfa_editor import PdfXfaEditor
-from xdp_form_cli.safe_io import backup_if_exists, require_safe_output
 from xdp_form_cli.xdp_editor import XdpEditor
 
 
@@ -38,17 +37,12 @@ def inject_xfa_fields(
     input_path: str | Path,
     output_path: str | Path,
     specs: list[AutoFieldSpec],
-    *,
-    overwrite: bool = False,
 ) -> Path:
     """Add a <field> for each spec into the matching PageN subform, save to output."""
     source = Path(input_path)
     output = Path(output_path)
     if output.resolve() == source.resolve():
         raise ValueError("XFA injector output must differ from the source PDF path.")
-    require_safe_output(output, overwrite=overwrite)
-    if overwrite:
-        backup_if_exists(output)
 
     editor = PdfXfaEditor(source)
     try:
@@ -86,8 +80,6 @@ def inject_xfa_fields_from_template(
     xfa_template_path: str | Path,
     output_pdf: str | Path,
     specs: list[AutoFieldSpec],
-    *,
-    overwrite: bool = False,
 ) -> Path:
     """Inject fields into an external XFA template and embed it in the source PDF.
 
@@ -99,9 +91,6 @@ def inject_xfa_fields_from_template(
     template_path = Path(xfa_template_path)
     if output.resolve() == source.resolve():
         raise ValueError("XFA injector output must differ from the source PDF path.")
-    require_safe_output(output, overwrite=overwrite)
-    if overwrite:
-        backup_if_exists(output)
     if not template_path.is_file():
         raise ValueError(f"XFA template file not found: {template_path}")
 

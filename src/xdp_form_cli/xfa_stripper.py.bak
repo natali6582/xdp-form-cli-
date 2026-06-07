@@ -5,8 +5,6 @@ from pathlib import Path
 import pikepdf
 from pikepdf import Name
 
-from xdp_form_cli.safe_io import backup_if_exists, require_safe_output
-
 
 def pdf_has_xfa(input_path: str | Path) -> bool:
     """Return True when the PDF has an /AcroForm with an /XFA entry."""
@@ -15,12 +13,7 @@ def pdf_has_xfa(input_path: str | Path) -> bool:
         return acroform is not None and Name("/XFA") in acroform
 
 
-def strip_xfa(
-    input_path: str | Path,
-    output_path: str | Path,
-    *,
-    overwrite: bool = False,
-) -> tuple[Path, bool]:
+def strip_xfa(input_path: str | Path, output_path: str | Path) -> tuple[Path, bool]:
     """Remove the embedded XFA packet and leave a plain AcroForm PDF.
 
     Dropping /XFA forces XFA-aware viewers (such as Adobe) to fall back to the
@@ -31,9 +24,6 @@ def strip_xfa(
     output = Path(output_path)
     if output.resolve() == source.resolve():
         raise ValueError("--output must be a new PDF file path, not the source PDF.")
-    require_safe_output(output, overwrite=overwrite)
-    if overwrite:
-        backup_if_exists(output)
 
     with pikepdf.Pdf.open(str(source)) as pdf:
         acroform = pdf.Root.get(Name("/AcroForm"))

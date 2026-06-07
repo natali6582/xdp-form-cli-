@@ -181,3 +181,82 @@ def _cell_xml(row_index: int, col_index: int, value: str) -> str:
 
 def _escape(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ---------------------------------------------------------------------------
+# XLSX zip-bomb protection
+# ---------------------------------------------------------------------------
+
+
+def _write_oversized_workbook(path: Path, *, decompressed_bytes: int) -> Path:
+    """Write an XLSX where sheet1 reports a decompressed size above the limit."""
+    import io
+    import zipfile as _zipfile
+
+    sheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        "<sheetData>"
+        '<row r="1"><c r="A1" t="inlineStr"><is><t>Header</t></is></c></row>'
+        "</sheetData></worksheet>"
+    )
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        "<sheets>"
+        '<sheet name="Sheet1" sheetId="1" r:id="rId1"/>'
+        "</sheets></workbook>"
+    )
+
+    buf = io.BytesIO()
+    with _zipfile.ZipFile(buf, "w", compression=_zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "")
+        zf.writestr("xl/workbook.xml", workbook_xml)
+        # Manually set file_size on the ZipInfo to simulate a large entry.
+        info = _zipfile.ZipInfo("xl/worksheets/sheet1.xml")
+        info.compress_type = _zipfile.ZIP_DEFLATED
+        zf.writestr(info, sheet_xml)
+
+    # Re-open and patch the file_size in the central directory.
+    buf.seek(0)
+    raw = buf.read()
+    # Write the archive normally; then patch file_size via monkeypatching in the test.
+    path.write_bytes(raw)
+    return path
+
+
+class TestXlsxZipBombProtection:
+    """_read_xlsx_rows must reject sheets that exceed the decompressed size limit."""
+
+    def test_read_xlsx_rows_raises_on_oversized_sheet(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import zipfile
+        import xdp_form_cli.field_name_resolution as fnr_module
+
+        workbook = _write_mapping_workbook(
+            tmp_path / "mapping.xlsx",
+            [("txtA", "txtB", "Direct match", "safe")],
+        )
+
+        # Patch ZipInfo.file_size to exceed the limit.
+        original_open = zipfile.ZipFile.open
+
+        def _patched_getinfo(self, name):
+            info = self._real_getinfo(name)
+            if "sheet" in name:
+                info.file_size = fnr_module.MAX_XLSX_DECOMPRESSED_BYTES + 1
+            return info
+
+        monkeypatch.setattr(zipfile.ZipFile, "_real_getinfo", zipfile.ZipFile.getinfo, raising=False)
+        monkeypatch.setattr(zipfile.ZipFile, "getinfo", _patched_getinfo)
+
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            fnr_module._read_xlsx_rows(workbook, sheet_index=1)
+
+    def test_max_xlsx_decompressed_bytes_constant_is_positive(self) -> None:
+        import xdp_form_cli.field_name_resolution as fnr_module
+
+        assert hasattr(fnr_module, "MAX_XLSX_DECOMPRESSED_BYTES")
+        assert fnr_module.MAX_XLSX_DECOMPRESSED_BYTES > 0

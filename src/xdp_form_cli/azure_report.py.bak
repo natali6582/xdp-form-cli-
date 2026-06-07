@@ -13,7 +13,6 @@ from xdp_form_cli.auto_form import (
     _load_azure_layout,
     _nearest_label,
 )
-from xdp_form_cli.safe_io import backup_if_exists, require_safe_output
 
 
 @dataclass(frozen=True)
@@ -33,7 +32,6 @@ def build_azure_layout_report(
     output_csv: str | Path,
     *,
     output_json: str | Path | None = None,
-    overwrite: bool = False,
 ) -> AzureReportSummary:
     """Run Azure Document Intelligence only and write a visual layout report."""
     known_fields = _load_known_field_names(fields_list_csv)
@@ -43,18 +41,8 @@ def build_azure_layout_report(
     if layout.warnings and not _has_layout_items(layout):
         raise ValueError(" ".join(layout.warnings))
 
-    csv_path = Path(output_csv)
-    require_safe_output(csv_path, overwrite=overwrite)
-    if overwrite:
-        backup_if_exists(csv_path)
-
-    json_path = Path(output_json) if output_json else None
-    if json_path is not None:
-        require_safe_output(json_path, overwrite=overwrite)
-        if overwrite:
-            backup_if_exists(json_path)
-
     rows = _report_rows(layout, known_fields)
+    csv_path = Path(output_csv)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(
@@ -73,6 +61,7 @@ def build_azure_layout_report(
         writer.writeheader()
         writer.writerows(rows)
 
+    json_path = Path(output_json) if output_json else None
     if json_path is not None:
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(

@@ -7,7 +7,6 @@ import pikepdf
 from pikepdf import Array, Name, Stream
 
 from xdp_form_cli.field_truth import FieldMatch
-from xdp_form_cli.safe_io import backup_if_exists, require_safe_output
 from xdp_form_cli.xdp_editor import PageSummary, XdpEditor
 
 
@@ -40,13 +39,10 @@ class PdfXfaEditor:
     def convert_field_names(self, matcher) -> list[FieldMatch]:
         return self.xdp.convert_field_names(matcher)
 
-    def save_copy(self, output_path: str | Path, *, overwrite: bool = False) -> Path:
+    def save_copy(self, output_path: str | Path) -> Path:
         output = Path(output_path)
         if output.resolve() == self.source_path.resolve():
             raise ValueError("--output must be a new PDF file path, not the source PDF.")
-        require_safe_output(output, overwrite=overwrite)
-        if overwrite:
-            backup_if_exists(output)
 
         updated_xfa = self.xdp.to_bytes()
         self._write_xfa(updated_xfa)

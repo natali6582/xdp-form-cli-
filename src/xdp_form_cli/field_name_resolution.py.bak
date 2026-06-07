@@ -14,9 +14,6 @@ _NUMBER_SUFFIX_RE = re.compile(r"_\d+$")
 _DIRECT_STATUSES = {"direct match"}
 _XLSX_NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
-# Reject XLSX sheets whose decompressed content exceeds this limit to prevent zip-bomb attacks.
-MAX_XLSX_DECOMPRESSED_BYTES = 50 * 1024 * 1024
-
 
 @dataclass(frozen=True)
 class FieldNameResolution:
@@ -369,12 +366,6 @@ def _read_xlsx_rows(path: Path, *, sheet_index: int) -> list[list[str]]:
     with zipfile.ZipFile(path) as archive:
         shared_strings = _read_shared_strings(archive)
         sheet_name = f"xl/worksheets/sheet{sheet_index}.xml"
-        info = archive.getinfo(sheet_name)
-        if info.file_size > MAX_XLSX_DECOMPRESSED_BYTES:
-            raise ValueError(
-                f"XLSX sheet '{sheet_name}' exceeds maximum allowed decompressed size "
-                f"({MAX_XLSX_DECOMPRESSED_BYTES} bytes)."
-            )
         with archive.open(sheet_name) as handle:
             tree = ET.parse(handle)
 

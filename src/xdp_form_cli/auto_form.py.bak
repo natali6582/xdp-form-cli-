@@ -86,9 +86,6 @@ CHECKBOX_GLYPHS = ("\x00\x86", "\x86", "☐", "□", "☑", "☒")
 # Cap on a downloaded PDF to avoid pulling an unbounded response into memory.
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
-# Maximum seconds allowed for any subprocess call (pdftotext, pdftoppm, etc.).
-SUBPROCESS_TIMEOUT_SECONDS = 60
-
 # Optional Azure Document Intelligence integration. It is opt-in because each
 # call sends the PDF to Azure and may incur cost.
 AZURE_ENDPOINT_ENV = "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT"
@@ -780,8 +777,8 @@ def _signature_contexts_from_pdf_text(pdf_path: str | Path) -> list[SignatureCon
             str(bbox_path),
         ]
         try:
-            subprocess.run(command, check=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT_SECONDS)
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            subprocess.run(command, check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError):
             return []
 
         contexts: list[SignatureContext] = []
@@ -934,12 +931,8 @@ def _can_convert_to_signature_image(spec: AutoFieldSpec) -> bool:
     return tokens <= {"by"}
 
 
-def write_field_csv(specs: list[AutoFieldSpec], csv_path: str | Path, *, overwrite: bool = False) -> Path:
+def write_field_csv(specs: list[AutoFieldSpec], csv_path: str | Path) -> Path:
     path = Path(csv_path)
-    from xdp_form_cli.safe_io import backup_if_exists, require_safe_output
-    require_safe_output(path, overwrite=overwrite)
-    if overwrite:
-        backup_if_exists(path)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["page", "name", "type", "x", "y", "w", "h", "value"])
@@ -950,12 +943,8 @@ def write_field_csv(specs: list[AutoFieldSpec], csv_path: str | Path, *, overwri
     return path
 
 
-def write_mapping_report(specs: list[AutoFieldSpec], report_path: str | Path, *, overwrite: bool = False) -> Path:
+def write_mapping_report(specs: list[AutoFieldSpec], report_path: str | Path) -> Path:
     path = Path(report_path)
-    from xdp_form_cli.safe_io import backup_if_exists, require_safe_output
-    require_safe_output(path, overwrite=overwrite)
-    if overwrite:
-        backup_if_exists(path)
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(
@@ -1047,8 +1036,8 @@ def _read_bbox_xml(pdf_path: str | Path) -> str:
             str(bbox_path),
         ]
         try:
-            subprocess.run(command, check=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT_SECONDS)
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            subprocess.run(command, check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError):
             return ""
         if not bbox_path.exists():
             return ""
