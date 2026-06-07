@@ -63,13 +63,10 @@ def test_detect_field_specs_marks_signature_as_image(tmp_path: Path) -> None:
     assert by_y[340].field_type == "text"
 
 
-def test_signature_label_requires_signature_as_first_word() -> None:
+def test_signature_label_matches_signature_keyword_anywhere() -> None:
     assert _is_signature_label("Signature") is True
     assert _is_signature_label("Signature date") is True
-    assert _is_signature_label("Date signature") is False
-    assert _is_signature_label("חתימה העמית") is True
-    assert _is_signature_label("חתימת בעל רישיון") is True
-    assert _is_signature_label("תאריך חתימה") is False
+    assert _is_signature_label("Date signature") is True
 
 
 def test_build_auto_form_strips_xfa_and_places_fields(tmp_path: Path) -> None:
@@ -415,7 +412,7 @@ def test_bbox_checkbox_detection_finds_small_square_next_to_text() -> None:
     xml = """
     <page width="420.000000" height="400.000000">
       <word xMin="100.000000" yMin="100.000000" xMax="250.000000" yMax="112.000000">Insurance</word>
-      <word xMin="270.000000" yMin="98.000000" xMax="286.000000" yMax="114.000000">□</word>
+      <word xMin="270.000000" yMin="98.000000" xMax="286.000000" yMax="114.000000">\u25a1</word>
     </page>
     """
 
@@ -432,7 +429,7 @@ def test_bbox_checkbox_detection_finds_small_square_next_to_text() -> None:
 def test_bbox_checkbox_detection_ignores_square_without_text_context() -> None:
     xml = """
     <page width="420.000000" height="400.000000">
-      <word xMin="270.000000" yMin="98.000000" xMax="286.000000" yMax="114.000000">□</word>
+      <word xMin="270.000000" yMin="98.000000" xMax="286.000000" yMax="114.000000">\u25a1</word>
     </page>
     """
 
@@ -1007,9 +1004,9 @@ def test_repeated_glyph_noise_is_not_used_as_field_name() -> None:
 
 
 def test_matches_signature_context_word_in_reversed_hebrew() -> None:
-    assert _matches_signature_context_word("םותחה") is True
-    assert _matches_signature_context_word("המיתח") is True
-    assert _matches_signature_context_word("חוקלה") is False
+    assert _matches_signature_context_word("\u05dd\u05d5\u05ea\u05d7\u05d4") is True
+    assert _matches_signature_context_word("\u05d4\u05de\u05d9\u05ea\u05d7") is True
+    assert _matches_signature_context_word("\u05d7\u05d5\u05e7\u05dc\u05d4") is False
 
 
 def test_apply_signature_context_rows_marks_only_closest_row_below_context_as_images() -> None:

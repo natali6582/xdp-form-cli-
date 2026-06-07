@@ -1974,14 +1974,8 @@ def _looks_like_readable_label(label: str) -> bool:
 def _is_signature_label(label: str) -> bool:
     if not _looks_like_text(label):
         return False
-    words = re.findall(r"[A-Za-z\u0590-\u05FF]+", label.casefold())
-    if not words:
-        return False
-    first_word = words[0]
-    english_signature_words = {"signature", "sign"}
-    if first_word in english_signature_words:
-        return True
-    return first_word in HEBREW_SIGNATURE_KEYWORDS
+    lowered = label.lower()
+    return any(keyword in lowered for keyword in SIGNATURE_KEYWORDS)
 
 
 def _looks_like_text(label: str) -> bool:
