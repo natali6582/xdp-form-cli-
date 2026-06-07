@@ -3,6 +3,8 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from xdp_form_cli.field_name_resolution import (
     FieldNameResolver,
     load_livecycle_mapping_aliases,
