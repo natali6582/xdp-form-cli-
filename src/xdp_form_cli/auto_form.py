@@ -1278,7 +1278,8 @@ def _bbox_word_gap_to_pdf_box(word: BBoxWord, box: DetectedBox) -> float:
 def _bbox_word_is_same_line_as_pdf_box(word: BBoxWord, box: DetectedBox) -> bool:
     box_y0 = word.page_height - (box.y + box.h)
     box_y1 = word.page_height - box.y
-    return max(box_y0 - word.y1, word.y0 - box_y1, 0) <= 8
+    vertical_overlap = min(box_y1, word.y1) - max(box_y0, word.y0)
+    return vertical_overlap >= 2
 
 
 def _bbox_has_label_context(source: BBoxWord, words: list[BBoxWord]) -> bool:

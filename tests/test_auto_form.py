@@ -135,6 +135,21 @@ def test_bbox_signature_label_uses_hebrew_direction_for_same_line() -> None:
     assert _bbox_has_signature_label_near_box(right_line, [signature_word]) is False
 
 
+def test_bbox_signature_label_below_line_does_not_require_rtl_side() -> None:
+    line = DetectedBox(page=1, x=363.2, y=545.4, w=141.2, h=12.0)
+    signature_word_below = BBoxWord(
+        page=1,
+        page_height=842.0,
+        text="\u05ea\u05de\u05d9\u05ea\u05d7",
+        x0=473.8,
+        y0=301.2,
+        x1=503.9,
+        y1=313.5,
+    )
+
+    assert _bbox_has_signature_label_near_box(line, [signature_word_below]) is True
+
+
 def test_bbox_signature_label_uses_english_direction_for_same_line() -> None:
     left_line = DetectedBox(page=1, x=100.0, y=700.0, w=120.0, h=12.0)
     right_line = DetectedBox(page=1, x=320.0, y=700.0, w=120.0, h=12.0)
