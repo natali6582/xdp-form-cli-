@@ -251,6 +251,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Overwrite output file if it already exists (a timestamped backup is created automatically).",
     )
+    create_acroform.add_argument(
+        "--design-xfa",
+        action="store_true",
+        default=False,
+        help="Also embed a scratch-built XFA template with the same fields so the PDF "
+        "opens with editable fields in LiveCycle Designer's Design View. "
+        "Without this flag the output is unchanged from previous versions.",
+    )
 
     validate_acroform_parser = subparsers.add_parser(
         "validate-acroform",
@@ -554,6 +562,32 @@ def cmd_create_acroform(args: argparse.Namespace) -> int:
     _print_validation_result(precheck, strict=args.strict_validation, title="Pre-create validation")
     if precheck.has_failures(strict=args.strict_validation):
         raise ValueError("Validation failed. Fix the field specification before creating the PDF.")
+
+    if getattr(args, "design_xfa", False):
+        # Build the AcroForm copy to a temp file, validate it, then embed the
+        # scratch XFA template into the final output. The AcroForm layer is
+        # byte-identical to the default path; only /AcroForm /XFA is added.
+        import tempfile
+
+        from xdp_form_cli.acroform_builder import load_field_specs
+        from xdp_form_cli.xfa_template_builder import embed_scratch_xfa
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            staged = Path(tmp_dir) / "acroform_only.pdf"
+            _, count = create_acroform_pdf(args.input, args.fields, staged)
+            colors.success(f"Created AcroForm layer with {count} field(s).")
+
+            postcheck = validate_acroform(args.fields, input_pdf=args.input, output_pdf=str(staged))
+            _print_validation_result(postcheck, strict=args.strict_validation, title="Post-create PDF validation")
+            if postcheck.has_failures(strict=args.strict_validation):
+                raise ValueError("Generated PDF failed validation.")
+
+            colors.step("Embedding scratch XFA template for Design View.")
+            specs = load_field_specs(args.fields)
+            output = embed_scratch_xfa(staged, args.output, specs, overwrite=args.overwrite)
+            colors.success(f"Saved AcroForm+XFA PDF copy: {output}")
+            colors.info("Open in LiveCycle Designer to edit fields in Design View; PDF view is unchanged.")
+        return 0
 
     output, count = create_acroform_pdf(args.input, args.fields, args.output, overwrite=args.overwrite)
     colors.success(f"Saved AcroForm PDF copy with {count} field(s): {output}")
