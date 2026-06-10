@@ -203,6 +203,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite output file(s) if they already exist (a timestamped backup is created automatically).",
     )
 
+    detect_parser = subparsers.add_parser(
+        "detect",
+        help="Analyze a PDF with deterministic heuristics and write a field-spec CSV of detected fields.",
+    )
+    detect_parser.add_argument("--input", required=True, help="Path to the source PDF file.")
+    detect_parser.add_argument(
+        "--output",
+        required=True,
+        help="Path for the detected field-spec CSV. Must not be the source file.",
+    )
+    detect_parser.add_argument(
+        "--patterns",
+        default=None,
+        help="Optional detection-patterns.json file extending the built-in label patterns.",
+    )
+
     create_acroform = subparsers.add_parser(
         "create-acroform",
         help="Create a new PDF copy with AcroForm fields from a CSV field specification.",
@@ -500,6 +516,26 @@ def cmd_azure_layout_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_detect(args: argparse.Namespace) -> int:
+    if args.input == args.output:
+        raise ValueError("--output must be a new file path, not the source file.")
+    if not _is_pdf(args.input):
+        raise ValueError("detect only supports PDF input.")
+
+    from xdp_form_cli.field_detection import detect_fields, write_detected_csv
+
+    colors.step(f"Analyzing PDF for likely form fields: {args.input}")
+    if args.patterns:
+        colors.info(f"Using extra label patterns from: {args.patterns}")
+    fields = detect_fields(args.input, patterns_path=args.patterns)
+    if not fields:
+        colors.warn("No fields were detected. The PDF may have no boxes, underlines, or 'Label:' anchors.")
+    csv_path = write_detected_csv(fields, args.output)
+    colors.success(f"Detected {len(fields)} field(s); saved field-spec CSV: {csv_path}")
+    colors.info("Review the CSV, adjust any row, then build with create-acroform.")
+    return 0
+
+
 def cmd_create_acroform(args: argparse.Namespace) -> int:
     if args.input == args.output:
         raise ValueError("--output must be a new file path, not the source file.")
@@ -599,6 +635,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_auto_client_form(args)
         if args.command == "azure-layout-report":
             return cmd_azure_layout_report(args)
+        if args.command == "detect":
+            return cmd_detect(args)
         if args.command == "create-acroform":
             return cmd_create_acroform(args)
         if args.command == "validate-acroform":

@@ -113,6 +113,20 @@ Replace a page inside a PDF with embedded XFA and write a new PDF:
 xdp-form-cli replace-page --input "C:\path\form.pdf" --page Page26 --fragment "C:\path\Page26.xml" --output "C:\path\form_copy.pdf"
 ```
 
+Detect likely form fields on a PDF with deterministic heuristics (no LLM/ML) and write an editable field-spec CSV:
+
+```powershell
+xdp-form-cli detect --input "C:\path\static.pdf" --output "C:\path\detected-fields.csv"
+```
+
+Extend the built-in label patterns with a custom JSON file:
+
+```powershell
+xdp-form-cli detect --input "C:\path\static.pdf" --output "C:\path\detected-fields.csv" --patterns "C:\path\detection-patterns.json"
+```
+
+`detect` combines vector-geometry detection (boxes, underlines, checkbox squares, underscore runs), label-pattern matching (Hebrew and English, see `examples/detection-patterns.json`), synthesis of fields next to `Label:` text that has no drawn box, and alignment clustering that snaps nearly-aligned fields to common grid lines. Field names are generated rule-based from the nearest label using a predefined Hebrew→English dictionary with deterministic transliteration as a fallback, prefixed by type (`txt`, `chk`, `img`, `dt`) and deduplicated with `_1`, `_2` suffixes. Date fields keep the `dt` name prefix but are emitted as `type=text` because the CSV only supports `text`, `textarea`, `checkbox`, and `image`. Review the CSV, adjust any row, then build with `create-acroform`.
+
 Create AcroForm fields over a static PDF:
 
 ```powershell
