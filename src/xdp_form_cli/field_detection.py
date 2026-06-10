@@ -110,9 +110,11 @@ def detect_fields(
     return _name_candidates(candidates, field_name_resolver)
 
 
-def write_detected_csv(specs: list[AutoFieldSpec], csv_path: str | Path) -> Path:
+def write_detected_csv(
+    specs: list[AutoFieldSpec], csv_path: str | Path, *, overwrite: bool = False
+) -> Path:
     """Write detected fields as a standard field-spec CSV."""
-    return write_field_csv(specs, csv_path)
+    return write_field_csv(specs, csv_path, overwrite=overwrite)
 
 
 def _page_candidates(
@@ -246,7 +248,7 @@ def _name_candidates(
     ordered = sorted(candidates, key=lambda c: (c.page, -c.y, c.x))
     for c in ordered:
         csv_type = CSV_TYPE_BY_LOGICAL.get(c.logical_type, "text")
-        name, method, matched = _resolve_name(c, csv_type, resolver, used_names)
+        name, method, matched, csv_type = _resolve_name(c, csv_type, resolver, used_names)
         specs.append(
             AutoFieldSpec(
                 page=c.page, name=name, field_type=csv_type,
@@ -262,16 +264,30 @@ def _resolve_name(
     csv_type: str,
     resolver: FieldNameResolver | None,
     used_names: dict[str, int],
-) -> tuple[str, str, bool]:
-    """Prefer a canonical Plan-T name for the label; fall back to a generated one."""
+) -> tuple[str, str, bool, str]:
+    """Prefer a canonical Plan-T name for the label; fall back to a generated one.
+
+    Returns ``(name, method, matched, csv_type)``. When the typed lookup
+    fails but the curated semantic label map knows the label under another
+    type (e.g. "תאריך חתימת לקוח" looks like a signature but is the text
+    field txtPersonSignatureDate), the canonical Plan-T type wins.
+    """
     if resolver is not None:
         generated = generate_field_name(candidate.label, candidate.logical_type, dict(used_names))
         resolution = resolver.resolve(generated, field_type=csv_type, label=candidate.label)
         if resolution.matched:
             name = resolver.unique_name(resolution.name, used_names)
-            return name, resolution.method, True
+            return name, resolution.method, True, csv_type
+        if csv_type != "checkbox":
+            for alt_type in ("text", "image"):
+                if alt_type == csv_type:
+                    continue
+                alt = resolver.resolve(generated, field_type=alt_type, label=candidate.label)
+                if alt.matched and alt.method == "semantic-label-map":
+                    name = resolver.unique_name(alt.name, used_names)
+                    return name, alt.method, True, alt_type
     name = generate_field_name(candidate.label, candidate.logical_type, used_names)
-    return name, "generated", False
+    return name, "generated", False, csv_type
 
 
 def _normalize_label(text: str) -> str:

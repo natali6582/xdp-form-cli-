@@ -169,6 +169,22 @@ def test_hebrew_checkbox_label_resolves_to_plan_t_name(tmp_path: Path) -> None:
     assert fields[0].field_type == "checkbox"
 
 
+def test_signature_date_label_resolves_to_text_field_not_image(tmp_path: Path) -> None:
+    # "תאריך חתימת לקוח" in cp1255 bytes: contains the signature keyword, but
+    # the Plan-T semantic map says it is the text field txtPersonSignatureDate.
+    source = _write_pdf(
+        tmp_path / "sigdate.pdf",
+        b"BT /F1 10 Tf 50 350 Td (\xfa\xe0\xf8\xe9\xea \xe7\xfa\xe9\xee\xfa \xec\xf7\xe5\xe7) Tj ET\n"
+        b"110 340 150 18 re S\n",
+    )
+
+    fields = detect_fields(source)
+
+    assert len(fields) == 1
+    assert fields[0].name == "txtPersonSignatureDate"
+    assert fields[0].field_type == "text"
+
+
 def test_unmatched_label_keeps_generated_name(tmp_path: Path) -> None:
     source = _write_pdf(
         tmp_path / "boxed.pdf",

@@ -139,8 +139,9 @@ def test_upload_uses_packaged_plan_t_defaults_for_field_names(tmp_path: Path) ->
 
     assert csv_download.status_code == 200
     csv_text = csv_download.get_data(as_text=True)
-    assert "txtAccountName" in csv_text
-    assert "txtNameOfAccountOwner" not in csv_text
+    # The full Plan-T inventory resolves "Account Owner Full Name" to the
+    # owner-name field, which is itself a canonical Plan-T name.
+    assert "txtNameOfAccountOwner" in csv_text
 
 
 def test_upload_ignores_unexpected_template_file_and_uses_single_pdf_flow(tmp_path: Path) -> None:

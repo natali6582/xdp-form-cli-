@@ -426,7 +426,9 @@ def test_build_auto_client_form_uses_packaged_plan_t_defaults(tmp_path: Path) ->
     )
 
     assert count == 1
-    assert "txtAccountName" in csv_path.read_text(encoding="utf-8")
+    # The full Plan-T inventory resolves "Account Owner Full Name" to the
+    # owner-name field, not the account-name field.
+    assert "txtNameOfAccountOwner" in csv_path.read_text(encoding="utf-8")
     assert summary.warnings == ("Plan-T field-name resolver matched all 1 field(s).",)
 
 

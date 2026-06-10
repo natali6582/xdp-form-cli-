@@ -218,6 +218,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional detection-patterns.json file extending the built-in label patterns.",
     )
+    detect_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Overwrite the output CSV if it already exists (a timestamped backup is created automatically).",
+    )
 
     create_acroform = subparsers.add_parser(
         "create-acroform",
@@ -530,7 +536,7 @@ def cmd_detect(args: argparse.Namespace) -> int:
     fields = detect_fields(args.input, patterns_path=args.patterns)
     if not fields:
         colors.warn("No fields were detected. The PDF may have no boxes, underlines, or 'Label:' anchors.")
-    csv_path = write_detected_csv(fields, args.output)
+    csv_path = write_detected_csv(fields, args.output, overwrite=args.overwrite)
     colors.success(f"Detected {len(fields)} field(s); saved field-spec CSV: {csv_path}")
     colors.info("Review the CSV, adjust any row, then build with create-acroform.")
     return 0
