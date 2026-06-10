@@ -32,6 +32,7 @@ from xdp_form_cli.auto_form import (
     write_field_csv,
 )
 from xdp_form_cli.detection_patterns import DetectionPatterns, classify_label, load_patterns
+from xdp_form_cli.field_name_resolution import FieldNameResolver
 from xdp_form_cli.field_naming import generate_field_name
 
 # Approximate average glyph advance at the 10pt label font, used to estimate
@@ -78,10 +79,23 @@ def detect_fields(
     *,
     patterns: DetectionPatterns | None = None,
     patterns_path: str | Path | None = None,
+    field_name_resolver: FieldNameResolver | None = None,
+    use_plan_t_names: bool = True,
 ) -> list[AutoFieldSpec]:
-    """Detect likely form fields on every page of a PDF."""
+    """Detect likely form fields on every page of a PDF.
+
+    By default, detected labels are resolved to canonical Plan-T field names
+    through the packaged Plan-T field list, LiveCycle mapping, and semantic
+    label map; unmatched fields keep their generated names.
+    """
     if patterns is None:
         patterns = load_patterns(patterns_path)
+    if field_name_resolver is None and use_plan_t_names:
+        from xdp_form_cli.auto_form import _load_field_name_resolver
+
+        field_name_resolver = _load_field_name_resolver(
+            fields_list_csv=None, mapping_xlsx=None, semantic_map_csv=None
+        )
 
     candidates: list[_Candidate] = []
     with pikepdf.Pdf.open(str(pdf_path)) as pdf:
@@ -93,7 +107,7 @@ def detect_fields(
             candidates.extend(_page_candidates(page, page_index, anchors, patterns))
 
     candidates = _snap_alignment(candidates)
-    return _name_candidates(candidates)
+    return _name_candidates(candidates, field_name_resolver)
 
 
 def write_detected_csv(specs: list[AutoFieldSpec], csv_path: str | Path) -> Path:
@@ -223,20 +237,41 @@ def _assign_cluster(cluster: list[float], mapping: dict[float, float]) -> None:
         mapping[value] = snap
 
 
-def _name_candidates(candidates: list[_Candidate]) -> list[AutoFieldSpec]:
+def _name_candidates(
+    candidates: list[_Candidate],
+    resolver: FieldNameResolver | None,
+) -> list[AutoFieldSpec]:
     used_names: dict[str, int] = {}
     specs: list[AutoFieldSpec] = []
     ordered = sorted(candidates, key=lambda c: (c.page, -c.y, c.x))
     for c in ordered:
-        name = generate_field_name(c.label, c.logical_type, used_names)
         csv_type = CSV_TYPE_BY_LOGICAL.get(c.logical_type, "text")
+        name, method, matched = _resolve_name(c, csv_type, resolver, used_names)
         specs.append(
             AutoFieldSpec(
                 page=c.page, name=name, field_type=csv_type,
                 x=round(c.x, 2), y=round(c.y, 2), w=round(c.w, 2), h=round(c.h, 2),
+                label=c.label, name_match_method=method, name_matched_plan_t=matched,
             )
         )
     return specs
+
+
+def _resolve_name(
+    candidate: _Candidate,
+    csv_type: str,
+    resolver: FieldNameResolver | None,
+    used_names: dict[str, int],
+) -> tuple[str, str, bool]:
+    """Prefer a canonical Plan-T name for the label; fall back to a generated one."""
+    if resolver is not None:
+        generated = generate_field_name(candidate.label, candidate.logical_type, dict(used_names))
+        resolution = resolver.resolve(generated, field_type=csv_type, label=candidate.label)
+        if resolution.matched:
+            name = resolver.unique_name(resolution.name, used_names)
+            return name, resolution.method, True
+    name = generate_field_name(candidate.label, candidate.logical_type, used_names)
+    return name, "generated", False
 
 
 def _normalize_label(text: str) -> str:

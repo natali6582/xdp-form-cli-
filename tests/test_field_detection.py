@@ -77,7 +77,7 @@ def test_no_synthesis_when_box_already_next_to_label(tmp_path: Path) -> None:
     assert fields[0].w == 150.0
 
 
-def test_date_label_box_is_typed_date_with_dt_prefix(tmp_path: Path) -> None:
+def test_date_label_resolves_to_plan_t_name_when_known(tmp_path: Path) -> None:
     source = _write_pdf(
         tmp_path / "date.pdf",
         b"BT /F1 10 Tf 50 350 Td (Date) Tj ET\n"
@@ -87,8 +87,23 @@ def test_date_label_box_is_typed_date_with_dt_prefix(tmp_path: Path) -> None:
     fields = detect_fields(source)
 
     assert len(fields) == 1
-    assert fields[0].name.startswith("dt")
+    # "Date" matches the canonical Plan-T field, which wins over the dt prefix.
+    assert fields[0].name == "txtDate"
     # CSV output type must stay within supported AcroForm types.
+    assert fields[0].field_type == "text"
+
+
+def test_date_label_keeps_dt_prefix_without_plan_t_names(tmp_path: Path) -> None:
+    source = _write_pdf(
+        tmp_path / "date.pdf",
+        b"BT /F1 10 Tf 50 350 Td (Date) Tj ET\n"
+        b"100 340 150 20 re S\n",
+    )
+
+    fields = detect_fields(source, use_plan_t_names=False)
+
+    assert len(fields) == 1
+    assert fields[0].name == "dtDate"
     assert fields[0].field_type == "text"
 
 
@@ -123,6 +138,47 @@ def test_write_detected_csv_round_trips(tmp_path: Path) -> None:
     assert rows[0]["name"] == "txtFullName"
     assert rows[0]["type"] == "text"
     assert float(rows[0]["w"]) == 150.0
+
+
+def test_hebrew_label_resolves_to_plan_t_name(tmp_path: Path) -> None:
+    # "שם סוכן" in cp1255 bytes; the packaged semantic map maps it to txtAgentName.
+    source = _write_pdf(
+        tmp_path / "agent.pdf",
+        b"BT /F1 10 Tf 50 350 Td (\xf9\xed \xf1\xe5\xeb\xef) Tj ET\n"
+        b"110 340 150 20 re S\n",
+    )
+
+    fields = detect_fields(source)
+
+    assert len(fields) == 1
+    assert fields[0].name == "txtAgentName"
+
+
+def test_hebrew_checkbox_label_resolves_to_plan_t_name(tmp_path: Path) -> None:
+    # "יועץ פנסיוני" in cp1255 bytes maps to chkPensionCounselor.
+    source = _write_pdf(
+        tmp_path / "counselor.pdf",
+        b"BT /F1 10 Tf 80 352 Td (\xe9\xe5\xf2\xf5 \xf4\xf0\xf1\xe9\xe5\xf0\xe9) Tj ET\n"
+        b"60 350 12 12 re S\n",
+    )
+
+    fields = detect_fields(source)
+
+    assert len(fields) == 1
+    assert fields[0].name == "chkPensionCounselor"
+    assert fields[0].field_type == "checkbox"
+
+
+def test_unmatched_label_keeps_generated_name(tmp_path: Path) -> None:
+    source = _write_pdf(
+        tmp_path / "boxed.pdf",
+        b"BT /F1 10 Tf 50 350 Td (Full Name) Tj ET\n"
+        b"100 340 150 20 re S\n",
+    )
+
+    fields = detect_fields(source)
+
+    assert fields[0].name == "txtFullName"
 
 
 def test_cli_detect_command_writes_csv(tmp_path: Path) -> None:
