@@ -94,10 +94,10 @@ def test_detect_field_specs_keeps_signature_underline_when_rejected_geo_overlaps
     assert signature_specs[0].w >= 100
 
 
-def test_signature_label_matches_signature_keyword_anywhere() -> None:
+def test_signature_label_matches_signature_keyword_only_at_start() -> None:
     assert _is_signature_label("Signature") is True
     assert _is_signature_label("Signature date") is True
-    assert _is_signature_label("Date signature") is True
+    assert _is_signature_label("Date signature") is False
 
 
 def test_signature_label_matches_hebrew_signature_words_at_start() -> None:
@@ -106,6 +106,9 @@ def test_signature_label_matches_hebrew_signature_words_at_start() -> None:
     assert _is_signature_label("\u05d7\u05ea\u05d9\u05de\u05d5\u05ea \u05d4\u05e6\u05d3\u05d3\u05d9\u05dd") is True
     assert _is_signature_label("\u05d7\u05d5\u05ea\u05dd \u05d4\u05d7\u05d1\u05e8\u05d4") is True
     assert _is_signature_label("\u05d7\u05d5\u05ea\u05de\u05ea \u05d4\u05d7\u05d1\u05e8\u05d4") is True
+    assert _is_signature_label("\u05d7\u05ea\u05d5\u05dd \u05de\u05d8\u05d4") is True
+    assert _is_signature_label("\u05d0\u05e0\u05d9 \u05d4\u05d7\u05ea\u05d5\u05dd \u05de\u05d8\u05d4") is False
+    assert _is_signature_label("\u05ea\u05d0\u05e8\u05d9\u05da \u05d7\u05ea\u05d9\u05de\u05d4") is False
 
 
 def test_bbox_signature_label_near_box_matches_reversed_hebrew_signature_word() -> None:
@@ -1383,6 +1386,87 @@ def test_apply_signature_context_rows_does_not_convert_labeled_amount_fields_to_
         ("txtDate", "text"),
     ]
     assert all(spec.name_matched_plan_t for spec in updated)
+
+
+def test_apply_signature_context_rows_converts_only_fields_whose_own_label_starts_with_signature() -> None:
+    specs = [
+        AutoFieldSpec(
+            page=21,
+            name="txtParentName",
+            field_type="text",
+            x=340.0,
+            y=280.0,
+            w=130.0,
+            h=12.0,
+            label="\u05e9\u05dd \u05d4\u05d4\u05d5\u05e8\u05d4",
+        ),
+        AutoFieldSpec(
+            page=21,
+            name="txtParentSignature",
+            field_type="text",
+            x=180.0,
+            y=280.0,
+            w=130.0,
+            h=12.0,
+            label="\u05d7\u05ea\u05d9\u05de\u05d4",
+        ),
+        AutoFieldSpec(
+            page=21,
+            name="txtParentDate",
+            field_type="text",
+            x=40.0,
+            y=280.0,
+            w=130.0,
+            h=12.0,
+            label="\u05ea\u05d0\u05e8\u05d9\u05da \u05d7\u05ea\u05d9\u05de\u05d4",
+        ),
+    ]
+
+    updated = _apply_signature_context_rows(
+        specs,
+        [SignatureContext(page=21, x0=250.0, x1=290.0, y=325.0, direction="rtl")],
+    )
+
+    assert [(spec.name, spec.field_type) for spec in updated] == [
+        ("txtParentName", "text"),
+        ("imgParentSignature", "image"),
+        ("txtParentDate", "text"),
+    ]
+
+
+def test_apply_signature_context_rows_does_not_convert_sentence_that_only_contains_signature_word() -> None:
+    specs = [
+        AutoFieldSpec(
+            page=22,
+            name="txtParentName",
+            field_type="text",
+            x=340.0,
+            y=280.0,
+            w=130.0,
+            h=12.0,
+            label="\u05d0\u05e0\u05d9 \u05d4\u05d7\u05ea\u05d5\u05dd \u05de\u05d8\u05d4",
+        ),
+        AutoFieldSpec(
+            page=22,
+            name="txtParentDate",
+            field_type="text",
+            x=40.0,
+            y=280.0,
+            w=130.0,
+            h=12.0,
+            label="\u05ea\u05d0\u05e8\u05d9\u05da",
+        ),
+    ]
+
+    updated = _apply_signature_context_rows(
+        specs,
+        [SignatureContext(page=22, x0=250.0, x1=290.0, y=325.0, direction="rtl")],
+    )
+
+    assert [(spec.name, spec.field_type) for spec in updated] == [
+        ("txtParentName", "text"),
+        ("txtParentDate", "text"),
+    ]
 
 
 def _write_unlabeled_horizontal_line_pdf(path: Path) -> Path:

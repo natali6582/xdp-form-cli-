@@ -54,9 +54,18 @@ HEBREW_SIGNATURE_LEADING_WORDS = (
     "\u05d7\u05ea\u05d9\u05de\u05d4",
     "\u05d7\u05ea\u05d9\u05de\u05ea",
     "\u05d7\u05ea\u05d9\u05de\u05d5\u05ea",
+    "\u05d7\u05ea\u05d5\u05dd",
+    "\u05d7\u05ea\u05dd",
+    "\u05d7\u05ea\u05de\u05d4",
+    "\u05d7\u05ea\u05de\u05d5",
+    "\u05d7\u05ea\u05de\u05ea\u05d9",
     "\u05d7\u05d5\u05ea\u05dd",
     "\u05d7\u05d5\u05ea\u05de\u05ea",
 )
+HEBREW_SIGNATURE_LABEL_FIRST_WORDS = HEBREW_SIGNATURE_LEADING_WORDS + (
+    "\u05d4\u05d7\u05ea\u05d5\u05dd",
+)
+ENGLISH_SIGNATURE_LABEL_FIRST_WORDS = ("signature", "sign", "signed")
 BBOX_WORD_RE = re.compile(
     r'<word\s+xMin="(?P<x0>[-0-9.]+)"\s+yMin="(?P<y0>[-0-9.]+)"\s+'
     r'xMax="(?P<x1>[-0-9.]+)"\s+yMax="(?P<y1>[-0-9.]+)">(?P<text>.*?)</word>'
@@ -2275,13 +2284,29 @@ def _looks_like_readable_label(label: str) -> bool:
 
 
 def _is_signature_label(label: str) -> bool:
+    return _label_starts_with_signature_word(label)
+
+
+def _label_starts_with_signature_word(label: str) -> bool:
     if not _looks_like_text(label):
         return False
-    first_word_match = re.search(r"[A-Za-z\u0590-\u05FF]+", label.casefold())
-    if first_word_match and first_word_match.group(0) in HEBREW_SIGNATURE_LEADING_WORDS:
+
+    lowered = label.casefold().lstrip()
+    if lowered.startswith("sign here"):
         return True
-    lowered = label.lower()
-    return any(keyword in lowered for keyword in SIGNATURE_KEYWORDS)
+
+    first_word_match = re.search(r"[A-Za-z\u0590-\u05FF]+", lowered)
+    if first_word_match is None:
+        return False
+
+    first_word = first_word_match.group(0)
+    reversed_first_word = first_word[::-1]
+    if (
+        first_word in HEBREW_SIGNATURE_LABEL_FIRST_WORDS
+        or reversed_first_word in HEBREW_SIGNATURE_LABEL_FIRST_WORDS
+    ):
+        return True
+    return first_word in ENGLISH_SIGNATURE_LABEL_FIRST_WORDS
 
 
 def _looks_like_text(label: str) -> bool:
