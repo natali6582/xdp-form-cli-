@@ -83,6 +83,11 @@ MAX_BOX_HEIGHT_PT = 120.0
 FIELD_FONT_SIZE_PT = 10.0
 MAX_FIELD_HEIGHT_PT = 2 * FIELD_FONT_SIZE_PT
 UNDERLINE_FIELD_HEIGHT_PT = 12.0
+VISUAL_UNDERLINE_DPI = 150
+VISUAL_UNDERLINE_DARK_THRESHOLD = 120
+VISUAL_UNDERLINE_MIN_WIDTH_PT = 40.0
+VISUAL_UNDERLINE_MAX_WIDTH_RATIO = 0.85
+VISUAL_UNDERLINE_MAX_THICKNESS_PT = 3.0
 
 # Checkbox size gates (PDF points): small, approximately square rectangles.
 MIN_CHECKBOX_PT = 6.0
@@ -132,6 +137,16 @@ class DetectedBox:
     y: float
     w: float
     h: float
+
+
+@dataclass(frozen=True)
+class RenderedGrayPage:
+    page: int
+    width_pt: float
+    height_pt: float
+    width_px: int
+    height_px: int
+    samples: bytes
 
 
 @dataclass(frozen=True)
@@ -420,6 +435,7 @@ def detect_field_specs(
     bbox_words_by_page = _bbox_words_by_page_from_xml(bbox_xml) if bbox_xml else {}
     bbox_underline_boxes = _bbox_underline_boxes_from_words(bbox_words_by_page) if bbox_words_by_page else {}
     bbox_checkbox_boxes = _bbox_checkbox_boxes_from_words(bbox_words_by_page) if bbox_words_by_page else {}
+    visual_underline_boxes = _detect_visual_underline_boxes(pdf_path)
     azure_underline_boxes = (
         _bbox_underline_boxes_from_words(azure_layout.words_by_page)
         if azure_layout is not None else {}
@@ -431,24 +447,49 @@ def detect_field_specs(
 
     with pikepdf.Pdf.open(str(pdf_path)) as pdf:
         for page_index, page in enumerate(pdf.pages, start=1):
+            page_w, page_h = _page_size(page)
             anchors = _extract_text_anchors(page)
             anchors.extend(_bbox_text_anchors_from_words(bbox_words_by_page.get(page_index, [])))
             if azure_layout is not None:
                 anchors.extend(azure_layout.anchors_by_page.get(page_index, []))
-            geo_boxes = _detect_boxes(page, page_index)
-            raw_underline_boxes = _detect_underline_boxes(page, page_index)
+            geo_boxes = [
+                b for b in _detect_boxes(page, page_index)
+                if _box_is_on_page(b, page_w, page_h)
+            ]
+            raw_underline_boxes = [
+                b for b in _detect_underline_boxes(page, page_index)
+                if _box_is_on_page(b, page_w, page_h)
+            ]
             underline_boxes = [
                 b for b in raw_underline_boxes
                 if not _overlaps_any(b, geo_boxes)
             ]
             underline_boxes.extend(
                 b for b in bbox_underline_boxes.get(page_index, [])
-                if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
+                if (
+                    _box_is_on_page(b, page_w, page_h)
+                    and not _overlaps_any(b, geo_boxes)
+                    and not _overlaps_any(b, underline_boxes)
+                )
             )
             underline_boxes.extend(
                 b for b in azure_underline_boxes.get(page_index, [])
-                if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
+                if (
+                    _box_is_on_page(b, page_w, page_h)
+                    and not _overlaps_any(b, geo_boxes)
+                    and not _overlaps_any(b, underline_boxes)
+                )
             )
+            if not geo_boxes and not underline_boxes:
+                underline_boxes.extend(
+                    b for b in visual_underline_boxes.get(page_index, [])
+                    if (
+                        _box_is_on_page(b, page_w, page_h)
+                        and not _looks_like_full_row_separator(b)
+                        and not _overlaps_any(b, geo_boxes)
+                        and not _overlaps_any(b, underline_boxes)
+                    )
+                )
             checkbox_boxes = [
                 b for b in _detect_checkbox_boxes(page, page_index)
                 if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
@@ -465,7 +506,8 @@ def detect_field_specs(
             checkbox_boxes.extend(
                 b for b in bbox_checkbox_boxes.get(page_index, [])
                 if (
-                    not _overlaps_any(b, geo_boxes)
+                    _box_is_on_page(b, page_w, page_h)
+                    and not _overlaps_any(b, geo_boxes)
                     and not _overlaps_any(b, underline_boxes)
                     and not _overlaps_any(b, checkbox_boxes)
                 )
@@ -473,7 +515,8 @@ def detect_field_specs(
             checkbox_boxes.extend(
                 b for b in azure_checkbox_boxes.get(page_index, [])
                 if (
-                    not _overlaps_any(b, geo_boxes)
+                    _box_is_on_page(b, page_w, page_h)
+                    and not _overlaps_any(b, geo_boxes)
                     and not _overlaps_any(b, underline_boxes)
                     and not _overlaps_any(b, checkbox_boxes)
                 )
@@ -694,9 +737,185 @@ def _pdf_page_sizes(pdf_path: str | Path) -> dict[int, tuple[float, float]]:
     sizes: dict[int, tuple[float, float]] = {}
     with pikepdf.Pdf.open(str(pdf_path)) as pdf:
         for page_number, page in enumerate(pdf.pages, start=1):
-            box = page.mediabox
-            sizes[page_number] = (float(box[2]) - float(box[0]), float(box[3]) - float(box[1]))
+            sizes[page_number] = _page_size(page)
     return sizes
+
+
+def _page_size(page: pikepdf.Page) -> tuple[float, float]:
+    box = page.mediabox
+    return (float(box[2]) - float(box[0]), float(box[3]) - float(box[1]))
+
+
+def _box_is_on_page(box: DetectedBox, page_w: float, page_h: float, margin: float = 2.0) -> bool:
+    if box.w <= 0 or box.h <= 0:
+        return False
+    return (
+        -margin <= box.x <= page_w + margin
+        and -margin <= box.y <= page_h + margin
+        and box.x + box.w <= page_w + margin
+        and box.y + box.h <= page_h + margin
+    )
+
+
+def _detect_visual_underline_boxes(pdf_path: str | Path) -> dict[int, list[DetectedBox]]:
+    rendered_pages = _render_gray_pages_with_pymupdf(pdf_path, VISUAL_UNDERLINE_DPI)
+    if not rendered_pages:
+        rendered_pages = _render_gray_pages_with_pdftoppm(pdf_path, VISUAL_UNDERLINE_DPI)
+    if not rendered_pages:
+        return {}
+
+    boxes_by_page: dict[int, list[DetectedBox]] = {}
+    for rendered in rendered_pages:
+        boxes = _visual_underline_boxes_from_gray_page(rendered, VISUAL_UNDERLINE_DPI)
+        if boxes:
+            boxes_by_page[rendered.page] = boxes
+    return boxes_by_page
+
+
+def _render_gray_pages_with_pymupdf(pdf_path: str | Path, dpi: int) -> list[RenderedGrayPage]:
+    try:
+        import fitz  # type: ignore[import-not-found]
+    except ImportError:
+        return []
+
+    scale = dpi / 72.0
+    rendered: list[RenderedGrayPage] = []
+    try:
+        with fitz.open(str(pdf_path)) as document:
+            for page_index in range(document.page_count):
+                page = document.load_page(page_index)
+                pixmap = page.get_pixmap(
+                    matrix=fitz.Matrix(scale, scale),
+                    colorspace=fitz.csGRAY,
+                    alpha=False,
+                )
+                rendered.append(
+                    RenderedGrayPage(
+                        page=page_index + 1,
+                        width_pt=float(page.rect.width),
+                        height_pt=float(page.rect.height),
+                        width_px=int(pixmap.width),
+                        height_px=int(pixmap.height),
+                        samples=bytes(pixmap.samples),
+                    )
+                )
+    except Exception:
+        return []
+    return rendered
+
+
+def _render_gray_pages_with_pdftoppm(pdf_path: str | Path, dpi: int) -> list[RenderedGrayPage]:
+    pdftoppm = shutil.which("pdftoppm")
+    if pdftoppm is None:
+        return []
+    try:
+        from PIL import Image
+    except ImportError:
+        return []
+
+    page_sizes = _pdf_page_sizes(pdf_path)
+    rendered: list[RenderedGrayPage] = []
+    with tempfile.TemporaryDirectory() as temp_dir:
+        prefix = Path(temp_dir) / "visual"
+        command = [
+            pdftoppm,
+            "-png",
+            "-gray",
+            "-r",
+            str(dpi),
+            str(pdf_path),
+            str(prefix),
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT_SECONDS)
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return []
+
+        images = sorted(Path(temp_dir).glob("visual-*.png"))
+        if not images:
+            images = sorted(Path(temp_dir).glob("visual.png"))
+        for page_number, image_path in enumerate(images, start=1):
+            page_w, page_h = page_sizes.get(page_number, (612.0, 792.0))
+            image = Image.open(image_path).convert("L")
+            rendered.append(
+                RenderedGrayPage(
+                    page=page_number,
+                    width_pt=page_w,
+                    height_pt=page_h,
+                    width_px=image.width,
+                    height_px=image.height,
+                    samples=image.tobytes(),
+                )
+            )
+    return rendered
+
+
+def _visual_underline_boxes_from_gray_page(rendered: RenderedGrayPage, dpi: int) -> list[DetectedBox]:
+    scale = dpi / 72.0
+    min_run_px = max(8, int(round(VISUAL_UNDERLINE_MIN_WIDTH_PT * scale)))
+    max_width_px = int(round(rendered.width_px * VISUAL_UNDERLINE_MAX_WIDTH_RATIO))
+    candidates: list[tuple[int, int, int]] = []
+
+    for row_index in range(rendered.height_px):
+        row_start = row_index * rendered.width_px
+        row = rendered.samples[row_start:row_start + rendered.width_px]
+        for run_start, run_end in _gray_dark_runs(row, min_run_px, VISUAL_UNDERLINE_DARK_THRESHOLD):
+            if run_end - run_start > max_width_px:
+                continue
+            candidates.append((row_index, run_start, run_end))
+
+    groups = _merge_visual_line_rows(candidates)
+    boxes: list[DetectedBox] = []
+    max_thickness_px = max(2, int(round(VISUAL_UNDERLINE_MAX_THICKNESS_PT * scale)))
+    for y0, y1, x0, x1 in groups:
+        if y1 - y0 + 1 > max_thickness_px:
+            continue
+        x = x0 / scale
+        w = (x1 - x0) / scale
+        if w < VISUAL_UNDERLINE_MIN_WIDTH_PT:
+            continue
+        y_mid = (y0 + y1) / 2
+        y = rendered.height_pt - (y_mid / scale)
+        box = DetectedBox(
+            page=rendered.page,
+            x=round(x, 1),
+            y=round(y, 1),
+            w=round(w, 1),
+            h=UNDERLINE_FIELD_HEIGHT_PT,
+        )
+        if _box_is_on_page(box, rendered.width_pt, rendered.height_pt):
+            boxes.append(box)
+    return _dedupe_similar_boxes(sorted(boxes, key=lambda box: (-box.y, box.x)))
+
+
+def _gray_dark_runs(row: bytes, min_run_px: int, threshold: int) -> list[tuple[int, int]]:
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, value in enumerate(row):
+        if value <= threshold:
+            if start is None:
+                start = index
+        elif start is not None:
+            if index - start >= min_run_px:
+                runs.append((start, index))
+            start = None
+    if start is not None and len(row) - start >= min_run_px:
+        runs.append((start, len(row)))
+    return runs
+
+
+def _merge_visual_line_rows(candidates: list[tuple[int, int, int]]) -> list[tuple[int, int, int, int]]:
+    groups: list[tuple[int, int, int, int]] = []
+    for row, x0, x1 in candidates:
+        if groups:
+            gy0, gy1, gx0, gx1 = groups[-1]
+            overlap = min(gx1, x1) - max(gx0, x0)
+            min_width = min(gx1 - gx0, x1 - x0)
+            if row <= gy1 + 2 and overlap >= min_width * 0.75:
+                groups[-1] = (gy0, row, min(gx0, x0), max(gx1, x1))
+                continue
+        groups.append((row, row, x0, x1))
+    return groups
 
 
 def _azure_polygon_bounds(polygon: object) -> tuple[float, float, float, float] | None:

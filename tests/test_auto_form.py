@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import shutil
 from pathlib import Path
 
@@ -951,6 +952,52 @@ def test_detect_field_specs_keeps_underlines_with_label_after(tmp_path: Path) ->
     assert specs[0].x == 40.0
     assert specs[0].y == 297.0
     assert specs[0].w == 120.0
+
+
+def _has_visual_pdf_renderer() -> bool:
+    return importlib.util.find_spec("fitz") is not None or shutil.which("pdftoppm") is not None
+
+
+def _write_image_only_underlines_pdf(path: Path) -> Path:
+    Image = pytest.importorskip("PIL.Image")
+    image = Image.new("RGB", (600, 800), "white")
+    pixels = image.load()
+    for y in (250, 320):
+        for x in range(120, 360):
+            pixels[x, y] = (0, 0, 0)
+            pixels[x, y + 1] = (0, 0, 0)
+    image.save(path, "PDF", resolution=72.0)
+    return path
+
+
+def test_detect_field_specs_uses_visual_underlines_for_image_only_pdf(tmp_path: Path) -> None:
+    if not _has_visual_pdf_renderer():
+        pytest.skip("visual PDF renderer is not installed")
+    source = _write_image_only_underlines_pdf(tmp_path / "image_underlines.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert [(round(spec.x), round(spec.w), spec.field_type) for spec in specs] == [
+        (120, 240, "text"),
+        (120, 240, "text"),
+    ]
+
+
+def _write_off_page_underline_pdf(path: Path) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=(300, 400))
+    page = pdf.pages[0]
+    page.obj[Name("/Contents")] = pdf.make_stream(b"10000 10000 1000 0.8 re S\n")
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_ignores_off_page_underlines(tmp_path: Path) -> None:
+    source = _write_off_page_underline_pdf(tmp_path / "off_page.pdf")
+
+    specs = detect_field_specs(source)
+
+    assert specs == []
 
 
 def _write_below_label_underline_pdf(path: Path) -> Path:
