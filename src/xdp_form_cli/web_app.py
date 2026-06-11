@@ -9,7 +9,6 @@ from pathlib import Path
 from flask import Flask, abort, render_template_string, request, send_file
 
 from xdp_form_cli.auto_form import MAX_DOWNLOAD_BYTES, build_auto_client_form
-from xdp_form_cli.acroform_builder import load_field_specs
 
 
 INDEX_TEMPLATE = """
@@ -53,7 +52,6 @@ INDEX_TEMPLATE = """
     </ul>
     {% endif %}
     <p><a href="{{ result.pdf_url }}">Download PDF</a></p>
-    <p><a href="{{ result.csv_url }}">Download CSV</a></p>
   </div>
   {% endif %}
 </body>
@@ -97,24 +95,26 @@ def create_app(config: dict | None = None) -> Flask:
 
         input_pdf = job_dir / original_name
         output_pdf = job_dir / f"{display_stem}_acroform.pdf"
-        output_csv = job_dir / f"{display_stem}_fields.csv"
         manifest_path = job_dir / "manifest.json"
 
         file.save(input_pdf)
 
         try:
-            _, _, count, summary = build_auto_client_form(input_pdf, output_pdf, csv_path=output_csv)
-            summary_text = _format_type_counts(summary.type_counts)
-            warnings = summary.warnings
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                transient_csv = Path(tmp_dir) / "detected_fields.csv"
+                _, _, count, summary = build_auto_client_form(input_pdf, output_pdf, csv_path=transient_csv)
+                summary_text = _format_type_counts(summary.type_counts)
+                warnings = summary.warnings
         except Exception as exc:  # pragma: no cover - exact PDF parser exceptions vary
             return render_template_string(INDEX_TEMPLATE, error=str(exc), result=None), 500
+        finally:
+            input_pdf.unlink(missing_ok=True)
 
         manifest_path.write_text(
             json.dumps(
                 {
                     "original_name": original_name,
                     "output_pdf_name": output_pdf.name,
-                    "output_csv_name": output_csv.name,
                 },
                 ensure_ascii=False,
             ),
@@ -126,7 +126,6 @@ def create_app(config: dict | None = None) -> Flask:
             "summary": summary_text,
             "warnings": warnings,
             "pdf_url": f"/downloads/{job_id}/pdf",
-            "csv_url": f"/downloads/{job_id}/csv",
         }
         return render_template_string(INDEX_TEMPLATE, error=None, result=result)
 
@@ -141,9 +140,6 @@ def create_app(config: dict | None = None) -> Flask:
         if kind == "pdf":
             target = job_dir / manifest["output_pdf_name"]
             mimetype = "application/pdf"
-        elif kind == "csv":
-            target = job_dir / manifest["output_csv_name"]
-            mimetype = "text/csv"
         else:
             abort(404)
 
@@ -153,13 +149,6 @@ def create_app(config: dict | None = None) -> Flask:
         return send_file(target, as_attachment=True, download_name=target.name, mimetype=mimetype)
 
     return app
-
-
-def _summarize_csv_types(csv_path: Path) -> str:
-    counts: dict[str, int] = {}
-    for spec in load_field_specs(csv_path):
-        counts[spec.field_type] = counts.get(spec.field_type, 0) + 1
-    return ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
 
 
 def _format_type_counts(counts: dict[str, int]) -> str:

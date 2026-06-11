@@ -46,11 +46,8 @@ This repository also includes a small web app for review flows:
 
 - upload a flat PDF and run auto-detection
 - download the generated fillable PDF
-- download the generated editable CSV
-- or upload two PDFs together:
-  - template/old PDF that already contains fields
-  - blank/new PDF with the same layout
-  - the app copies the field structure from the template onto the new PDF
+- process every upload from scratch; the web app does not keep the uploaded
+  input PDF or the intermediate editable CSV
 
 Run locally:
 
