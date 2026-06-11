@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import hmac
 import json
 import os
 import tempfile
 import uuid
 from pathlib import Path
 
-from flask import Flask, Response, abort, render_template_string, request, send_file
+from flask import Flask, abort, render_template_string, request, send_file
 
 from xdp_form_cli.auto_form import MAX_DOWNLOAD_BYTES, build_auto_client_form
 from xdp_form_cli.acroform_builder import load_field_specs
-from xdp_form_cli.job_cleanup import DEFAULT_TTL_SECONDS, sweep_expired_jobs
 
 
 INDEX_TEMPLATE = """
@@ -68,37 +66,11 @@ def create_app(config: dict | None = None) -> Flask:
     app.config.update(
         JOB_STORAGE_DIR=Path(os.environ.get("JOB_STORAGE_DIR", Path(tempfile.gettempdir()) / "xdp-form-jobs")),
         MAX_CONTENT_LENGTH=MAX_DOWNLOAD_BYTES,
-        JOB_TTL_SECONDS=float(os.environ.get("JOB_TTL_SECONDS", DEFAULT_TTL_SECONDS)),
-        BASIC_AUTH_USERNAME=os.environ.get("WEB_APP_USERNAME", ""),
-        BASIC_AUTH_PASSWORD=os.environ.get("WEB_APP_PASSWORD", ""),
     )
     if config:
         app.config.update(config)
     app.config["JOB_STORAGE_DIR"] = Path(app.config["JOB_STORAGE_DIR"])
     app.config["JOB_STORAGE_DIR"].mkdir(parents=True, exist_ok=True)
-    sweep_expired_jobs(app.config["JOB_STORAGE_DIR"], ttl_seconds=app.config["JOB_TTL_SECONDS"])
-
-    @app.before_request
-    def _require_basic_auth():
-        username = app.config["BASIC_AUTH_USERNAME"]
-        password = app.config["BASIC_AUTH_PASSWORD"]
-        if not (username and password) or request.path == "/healthz":
-            return None
-
-        auth = request.authorization
-        if (
-            auth is not None
-            and auth.type == "basic"
-            and hmac.compare_digest(auth.username or "", username)
-            and hmac.compare_digest(auth.password or "", password)
-        ):
-            return None
-
-        return Response(
-            "Authentication required.",
-            status=401,
-            headers={"WWW-Authenticate": 'Basic realm="xdp-form-cli"'},
-        )
 
     @app.get("/")
     def index():
@@ -119,7 +91,6 @@ def create_app(config: dict | None = None) -> Flask:
             return render_template_string(INDEX_TEMPLATE, error="Only .pdf uploads are supported.", result=None), 400
 
         display_stem = Path(original_name).stem or "uploaded"
-        sweep_expired_jobs(app.config["JOB_STORAGE_DIR"], ttl_seconds=app.config["JOB_TTL_SECONDS"])
         job_id = uuid.uuid4().hex
         job_dir = app.config["JOB_STORAGE_DIR"] / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
@@ -137,8 +108,6 @@ def create_app(config: dict | None = None) -> Flask:
             warnings = summary.warnings
         except Exception as exc:  # pragma: no cover - exact PDF parser exceptions vary
             return render_template_string(INDEX_TEMPLATE, error=str(exc), result=None), 500
-        finally:
-            input_pdf.unlink(missing_ok=True)
 
         manifest_path.write_text(
             json.dumps(

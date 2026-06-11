@@ -58,18 +58,6 @@ Run locally:
 python -m flask --app xdp_form_cli.web_app run
 ```
 
-### Retention and access control
-
-Uploaded PDFs are client documents. The app enforces a retention policy:
-
-- The uploaded input PDF is deleted immediately after processing; only the
-  generated PDF/CSV outputs remain for download.
-- Job directories are swept on startup and before each upload. Jobs older
-  than `JOB_TTL_SECONDS` (default `21600`, which is 6 hours) are deleted.
-- Set `WEB_APP_USERNAME` and `WEB_APP_PASSWORD` to require HTTP Basic auth
-  on all routes except `/healthz`. If either is unset, the app stays open,
-  so do not deploy it publicly without setting both.
-
 Open [http://127.0.0.1:5000](http://127.0.0.1:5000).
 
 ### Render deployment
