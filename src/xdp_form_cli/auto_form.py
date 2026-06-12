@@ -592,7 +592,7 @@ def detect_field_specs(
     contexts = _signature_contexts_from_pdf_text(pdf_path)
     if azure_layout is not None:
         contexts.extend(_signature_contexts_from_azure_layout(azure_layout))
-    return _apply_signature_context_rows(specs, contexts)
+    return _dedupe_final_field_names(_apply_signature_context_rows(specs, contexts))
 
 
 def _should_use_azure_document_intelligence(value: bool | None) -> bool:
@@ -1113,6 +1113,30 @@ def _apply_signature_context_rows(
             ))
         else:
             updated.append(spec)
+    return updated
+
+
+def _dedupe_final_field_names(specs: list[AutoFieldSpec]) -> list[AutoFieldSpec]:
+    seen: dict[str, int] = {}
+    updated: list[AutoFieldSpec] = []
+    for spec in specs:
+        count = seen.get(spec.name, 0)
+        seen[spec.name] = count + 1
+        if count == 0:
+            updated.append(spec)
+            continue
+        updated.append(AutoFieldSpec(
+            page=spec.page,
+            name=f"{spec.name}_duplicate{count}",
+            field_type=spec.field_type,
+            x=spec.x,
+            y=spec.y,
+            w=spec.w,
+            h=spec.h,
+            label=spec.label,
+            name_match_method=spec.name_match_method,
+            name_matched_plan_t=spec.name_matched_plan_t,
+        ))
     return updated
 
 

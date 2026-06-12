@@ -53,4 +53,8 @@ def test_image_fields_are_xfa_push_buttons_with_raised_grey_appearance() -> None
     bind = field.find(_tag("bind"))
     assert bind is not None
     assert bind.get("match") == "none"
+
+    traverse = field.find(f"{_tag('traversal')}/{_tag('traverse')}")
+    assert traverse is not None
+    assert traverse.get("ref") == ""
     assert field.find(_tag("value")) is None

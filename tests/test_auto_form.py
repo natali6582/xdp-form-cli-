@@ -25,6 +25,7 @@ from xdp_form_cli.auto_form import (
     _bbox_underline_boxes_from_words,
     _bbox_underline_boxes_from_xml,
     _checkbox_base_name,
+    _dedupe_final_field_names,
     _filter_specs_by_original_content,
     _is_signature_label,
     _load_field_name_resolver,
@@ -1480,6 +1481,43 @@ def test_apply_signature_context_rows_converts_only_fields_whose_own_label_start
         ("txtParentName", "text"),
         ("imgParentSignature", "image"),
         ("txtParentDate", "text"),
+    ]
+
+
+def test_final_field_names_suffix_duplicates_after_signature_conversion() -> None:
+    specs = [
+        AutoFieldSpec(
+            page=21,
+            name="imgPersonSignature",
+            field_type="image",
+            x=340.0,
+            y=280.0,
+            w=130.0,
+            h=12.0,
+            label="\u05d7\u05ea\u05d9\u05de\u05d4",
+        ),
+        AutoFieldSpec(
+            page=21,
+            name="txtPersonSignature",
+            field_type="text",
+            x=180.0,
+            y=280.0,
+            w=130.0,
+            h=12.0,
+            label="\u05d7\u05ea\u05d9\u05de\u05d4",
+        ),
+    ]
+
+    updated = _dedupe_final_field_names(
+        _apply_signature_context_rows(
+            specs,
+            [SignatureContext(page=21, x0=250.0, x1=290.0, y=325.0, direction="rtl")],
+        )
+    )
+
+    assert [(spec.name, spec.field_type) for spec in updated] == [
+        ("imgPersonSignature", "image"),
+        ("imgPersonSignature_duplicate1", "image"),
     ]
 
 
