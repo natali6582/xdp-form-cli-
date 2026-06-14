@@ -93,6 +93,7 @@ VISUAL_UNDERLINE_MAX_THICKNESS_PT = 3.0
 MIN_CHECKBOX_PT = 6.0
 MAX_CHECKBOX_PT = 20.0
 VISUAL_CHECKBOX_GLYPHS = {"□", "☐", "▢", "◻", "▫", "☑", "☒"}
+PRIVATE_USE_CHECKBOX_GLYPHS = {"\uf0f0"}
 VISUAL_CHECKBOX_MIN_PT = 10.0
 VISUAL_CHECKBOX_MAX_PT = 20.0
 CHECKBOX_GLYPHS = ("\x00\x86", "\x86", "☐", "□", "☑", "☒")
@@ -462,7 +463,11 @@ def detect_field_specs(
             ]
             underline_boxes = [
                 b for b in raw_underline_boxes
-                if not _overlaps_any(b, geo_boxes)
+                if (
+                    not _has_conflicting_text_content(b, anchors)
+                    and not _looks_like_inline_printed_underscore(b, anchors)
+                    and not _overlaps_any(b, geo_boxes)
+                )
             ]
             underline_boxes.extend(
                 b for b in bbox_underline_boxes.get(page_index, [])
@@ -480,16 +485,17 @@ def detect_field_specs(
                     and not _overlaps_any(b, underline_boxes)
                 )
             )
-            if not geo_boxes and not underline_boxes:
-                underline_boxes.extend(
-                    b for b in visual_underline_boxes.get(page_index, [])
-                    if (
-                        _box_is_on_page(b, page_w, page_h)
-                        and not _looks_like_full_row_separator(b)
-                        and not _overlaps_any(b, geo_boxes)
-                        and not _overlaps_any(b, underline_boxes)
-                    )
+            underline_boxes.extend(
+                b for b in visual_underline_boxes.get(page_index, [])
+                if (
+                    _box_is_on_page(b, page_w, page_h)
+                    and not _looks_like_full_row_separator(b)
+                    and not _looks_like_box_edge(b, geo_boxes)
+                    and not _looks_like_table_row_separator(b, geo_boxes)
+                    and not _overlaps_any(b, geo_boxes)
+                    and not _overlaps_any(b, underline_boxes)
                 )
+            )
             checkbox_boxes = [
                 b for b in _detect_checkbox_boxes(page, page_index)
                 if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
@@ -552,7 +558,12 @@ def detect_field_specs(
             geo_boxes = _filter_fillable_text_boxes(geo_boxes, anchors)
             underline_boxes.extend(
                 b for b in raw_underline_boxes
-                if not _overlaps_any(b, geo_boxes) and not _overlaps_any(b, underline_boxes)
+                if (
+                    not _has_conflicting_text_content(b, anchors)
+                    and not _looks_like_inline_printed_underscore(b, anchors)
+                    and not _overlaps_any(b, geo_boxes)
+                    and not _overlaps_any(b, underline_boxes)
+                )
             )
             # Underscore runs are themselves a strong fillable-field signal
             # (for example: "Name ______, Number").  Keep them separate from
@@ -560,9 +571,11 @@ def detect_field_specs(
             boxes = geo_boxes + underline_boxes
             for box in boxes:
                 label = _nearest_label(box, anchors)
+                bbox_words = bbox_words_by_page.get(page_index, [])
+                label = _bbox_same_line_label_for_box(box, bbox_words) or label
                 is_signature = (
                     _is_signature_label(label)
-                    or _bbox_has_signature_label_near_box(box, bbox_words_by_page.get(page_index, []))
+                    or _bbox_has_signature_label_near_box(box, bbox_words)
                 )
                 base = _field_base_name(label, is_signature)
                 field_type = "image" if is_signature else "text"
@@ -1403,10 +1416,24 @@ def _text_is_fill_line(text: str) -> bool:
 
 
 def _bbox_word_checkbox_box(word: BBoxWord) -> DetectedBox | None:
-    if word.text.strip() not in VISUAL_CHECKBOX_GLYPHS:
+    text = word.text.strip()
+    if text not in VISUAL_CHECKBOX_GLYPHS and text not in PRIVATE_USE_CHECKBOX_GLYPHS:
         return None
     width = word.x1 - word.x0
     height = word.y1 - word.y0
+    if text in PRIVATE_USE_CHECKBOX_GLYPHS:
+        if not (MIN_CHECKBOX_PT <= width <= VISUAL_CHECKBOX_MAX_PT):
+            return None
+        if not (VISUAL_CHECKBOX_MIN_PT <= height <= VISUAL_CHECKBOX_MAX_PT):
+            return None
+        size = round(max(width, height), 1)
+        return DetectedBox(
+            page=word.page,
+            x=round(word.x0, 1),
+            y=round(word.page_height - word.y1, 1),
+            w=size,
+            h=size,
+        )
     if not (VISUAL_CHECKBOX_MIN_PT <= width <= VISUAL_CHECKBOX_MAX_PT):
         return None
     if not (VISUAL_CHECKBOX_MIN_PT <= height <= VISUAL_CHECKBOX_MAX_PT):
@@ -1474,6 +1501,8 @@ def _bbox_has_fillable_context(source: BBoxWord, box: DetectedBox, words: list[B
     source_context = re.sub(r"_+", "", source.text)
     if _effective_text_len(source_context) > 0:
         return True
+    if _bbox_looks_like_inline_printed_underscore(source, words):
+        return False
     if _bbox_has_signature_label_near_box(box, words):
         return True
 
@@ -1490,15 +1519,125 @@ def _bbox_has_fillable_context(source: BBoxWord, box: DetectedBox, words: list[B
     return False
 
 
+def _bbox_looks_like_inline_printed_underscore(source: BBoxWord, words: list[BBoxWord]) -> bool:
+    same_line_words = [
+        word for word in words
+        if (
+            word is not source
+            and "_" not in word.text
+            and _bbox_words_share_line(source, word)
+        )
+    ]
+    left_words = sorted(
+        [word for word in same_line_words if word.x1 <= source.x0 + 2],
+        key=lambda word: word.x1,
+        reverse=True,
+    )
+    if not left_words:
+        return False
+
+    immediate_left = left_words[0]
+    if source.x0 - immediate_left.x1 > 3:
+        return False
+    if immediate_left.text.strip() not in {",", ";"}:
+        return False
+
+    readable_before_punctuation = [
+        word for word in left_words[1:]
+        if source.x0 - word.x1 <= 130 and _effective_text_len(word.text) > 0
+    ]
+    return len(readable_before_punctuation) >= 2
+
+
 def _bbox_has_signature_label_near_box(box: DetectedBox, words: list[BBoxWord]) -> bool:
+    left_label = _bbox_same_line_label_segment(box, words, side="left")
+    if _signature_label_direction(left_label) == "ltr":
+        return True
+
+    right_label = _bbox_same_line_label_segment(box, words, side="right")
+    if _signature_label_direction(right_label) == "rtl":
+        return True
+
+    if left_label or right_label:
+        return False
+
     for word in words:
         if "_" in word.text or _effective_text_len(word.text) == 0:
+            continue
+        if _bbox_word_is_same_line_as_pdf_box(word, box):
             continue
         if not _bbox_word_is_signature_label(word.text):
             continue
         if _bbox_signature_word_allows_box(word, box):
             return True
     return False
+
+
+def _bbox_same_line_signature_label_allows_box(box: DetectedBox, words: list[BBoxWord]) -> bool:
+    left_label = _bbox_same_line_label_segment(box, words, side="left")
+    if _signature_label_direction(left_label) == "ltr":
+        return True
+
+    right_label = _bbox_same_line_label_segment(box, words, side="right")
+    return _signature_label_direction(right_label) == "rtl"
+
+
+def _bbox_same_line_label_for_box(box: DetectedBox, words: list[BBoxWord]) -> str:
+    left_label = _bbox_same_line_label_segment(box, words, side="left")
+    if _signature_label_direction(left_label) == "ltr":
+        return left_label
+
+    right_label = _bbox_same_line_label_segment(box, words, side="right")
+    if right_label:
+        return right_label
+    return left_label
+
+
+def _bbox_same_line_label_segment(box: DetectedBox, words: list[BBoxWord], *, side: str) -> str:
+    same_line_words = [
+        word for word in words
+        if (
+            "_" not in word.text
+            and _effective_text_len(word.text) > 0
+            and _bbox_word_is_same_line_as_pdf_box(word, box)
+        )
+    ]
+    if side == "left":
+        ordered = sorted(
+            [word for word in same_line_words if word.x1 <= box.x + 2],
+            key=lambda word: word.x1,
+            reverse=True,
+        )
+        boundary = box.x
+        segment: list[BBoxWord] = []
+        for word in ordered:
+            gap = boundary - word.x1
+            if gap < -2:
+                continue
+            if gap > (90 if not segment else 60):
+                break
+            segment.append(word)
+            boundary = word.x0
+        return " ".join(word.text for word in sorted(segment, key=lambda word: word.x0))
+
+    if side == "right":
+        ordered = sorted(
+            [word for word in same_line_words if word.x0 >= box.x + box.w - 20],
+            key=lambda word: word.x0,
+        )
+        boundary = box.x + box.w
+        segment = []
+        for word in ordered:
+            gap = word.x0 - boundary
+            if gap < -20:
+                continue
+            if gap > (90 if not segment else 60):
+                break
+            segment.append(word)
+            boundary = word.x1
+        return " ".join(word.text for word in sorted(segment, key=lambda word: word.x0, reverse=True))
+
+    return ""
 
 
 def _bbox_word_is_signature_label(text: str) -> bool:
@@ -2274,9 +2413,18 @@ def _filter_fillable_text_boxes(
 ) -> list[DetectedBox]:
     direct = [box for box in boxes if _is_fillable_text_box(box, anchors)]
     accepted = list(direct)
+    accepted.extend(
+        box for box in boxes
+        if (
+            box not in accepted
+            and not _looks_like_full_row_separator(box)
+            and not _has_conflicting_text_content(box, anchors)
+            and _is_stacked_blank_line_field(box, boxes, anchors)
+        )
+    )
 
     for box in boxes:
-        if box in direct or _looks_like_full_row_separator(box) or _has_conflicting_text_content(box, anchors):
+        if box in accepted or _looks_like_full_row_separator(box) or _has_conflicting_text_content(box, anchors):
             continue
         if _has_fillable_row_peer(box, direct, boxes, anchors):
             accepted.append(box)
@@ -2291,6 +2439,43 @@ def _filter_fillable_text_boxes(
             accepted.append(box)
 
     return _dedupe_similar_boxes(accepted)
+
+
+def _is_stacked_blank_line_field(
+    box: DetectedBox,
+    boxes: list[DetectedBox],
+    anchors: list[TextAnchor],
+) -> bool:
+    if box.h > UNDERLINE_FIELD_HEIGHT_PT or box.w < 180:
+        return False
+
+    aligned = [
+        other for other in boxes
+        if (
+            other.page == box.page
+            and other.h <= UNDERLINE_FIELD_HEIGHT_PT
+            and other.w >= 180
+            and abs(other.x - box.x) <= 8
+            and abs(other.w - box.w) <= 12
+        )
+    ]
+    if len(aligned) < 2:
+        return False
+
+    y_values = sorted(other.y for other in aligned)
+    if max(y_values) - min(y_values) > 80:
+        return False
+    if not any(8 <= higher - lower <= 24 for lower, higher in zip(y_values, y_values[1:])):
+        return False
+
+    top_y = max(y_values)
+    return any(
+        _effective_text_len(anchor.text) > 0
+        and not _looks_like_section_number(anchor.text)
+        and box.x - 40 <= anchor.x <= box.x + box.w + 40
+        and top_y < anchor.y <= top_y + 40
+        for anchor in anchors
+    )
 
 
 def _dedupe_similar_boxes(boxes: list[DetectedBox]) -> list[DetectedBox]:
@@ -2338,8 +2523,79 @@ def _has_conflicting_text_content(box: DetectedBox, anchors: list[TextAnchor]) -
     return bool(below) and not _looks_like_short_below_label(below)
 
 
+def _looks_like_inline_printed_underscore(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
+    if box.h > 16 or box.w < 35:
+        return False
+
+    same_line = [
+        anchor for anchor in anchors
+        if (
+            _effective_text_len(anchor.text) > 0
+            and not _looks_like_section_number(anchor.text)
+            and box.y - 4 <= anchor.y <= box.y + box.h + 4
+        )
+    ]
+    if not same_line:
+        return False
+
+    before = [
+        anchor for anchor in same_line
+        if 0 <= box.x - anchor.x <= 180
+    ]
+    after = [
+        anchor for anchor in same_line
+        if 0 <= anchor.x - (box.x + box.w) <= 60
+    ]
+    if before and after:
+        return True
+
+    if len(before) >= 2:
+        before_len = sum(_effective_text_len(anchor.text) for anchor in before)
+        if before_len > 10:
+            return True
+
+    if len(after) >= 2:
+        after_len = sum(_effective_text_len(anchor.text) for anchor in after)
+        after_span = max(anchor.x for anchor in after) - min(anchor.x for anchor in after)
+        if after_len > 10 and after_span <= 12:
+            return True
+
+    return False
+
+
 def _looks_like_full_row_separator(box: DetectedBox) -> bool:
     return box.h <= UNDERLINE_FIELD_HEIGHT_PT and box.w >= 450
+
+
+def _looks_like_box_edge(line: DetectedBox, boxes: list[DetectedBox]) -> bool:
+    if line.h > UNDERLINE_FIELD_HEIGHT_PT:
+        return False
+    for box in boxes:
+        same_span = abs(line.x - box.x) <= 3 and abs(line.w - box.w) <= 4
+        if not same_span:
+            continue
+        if abs(line.y - box.y) <= 3 or abs(line.y - (box.y + box.h)) <= 3:
+            return True
+    return False
+
+
+def _looks_like_table_row_separator(line: DetectedBox, boxes: list[DetectedBox]) -> bool:
+    if line.h > UNDERLINE_FIELD_HEIGHT_PT:
+        return False
+    row_boxes = [
+        box for box in boxes
+        if (
+            box.page == line.page
+            and abs(line.y - (box.y + box.h)) <= 3
+            and line.x <= box.x + 3
+            and line.x + line.w >= box.x + box.w - 3
+        )
+    ]
+    if len(row_boxes) < 2:
+        return False
+    span_x0 = min(box.x for box in row_boxes)
+    span_x1 = max(box.x + box.w for box in row_boxes)
+    return abs(line.x - span_x0) <= 4 and abs((line.x + line.w) - span_x1) <= 4
 
 
 def _has_fillable_label_context(box: DetectedBox, anchors: list[TextAnchor]) -> bool:
@@ -2527,20 +2783,24 @@ def _looks_like_readable_label(label: str) -> bool:
 
 
 def _is_signature_label(label: str) -> bool:
-    return _label_starts_with_signature_word(label)
+    return _signature_label_direction(label) is not None
 
 
 def _label_starts_with_signature_word(label: str) -> bool:
+    return _signature_label_direction(label) is not None
+
+
+def _signature_label_direction(label: str) -> str | None:
     if not _looks_like_text(label):
-        return False
+        return None
 
     lowered = label.casefold().lstrip()
     if lowered.startswith("sign here"):
-        return True
+        return "ltr"
 
     first_word_match = re.search(r"[A-Za-z\u0590-\u05FF]+", lowered)
     if first_word_match is None:
-        return False
+        return None
 
     first_word = first_word_match.group(0)
     reversed_first_word = first_word[::-1]
@@ -2548,8 +2808,10 @@ def _label_starts_with_signature_word(label: str) -> bool:
         first_word in HEBREW_SIGNATURE_LABEL_FIRST_WORDS
         or reversed_first_word in HEBREW_SIGNATURE_LABEL_FIRST_WORDS
     ):
-        return True
-    return first_word in ENGLISH_SIGNATURE_LABEL_FIRST_WORDS
+        return "rtl"
+    if first_word in ENGLISH_SIGNATURE_LABEL_FIRST_WORDS:
+        return "ltr"
+    return None
 
 
 def _looks_like_text(label: str) -> bool:
