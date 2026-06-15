@@ -255,3 +255,7 @@ def _populate_image(field: etree._Element) -> None:
 
     bind = etree.SubElement(field, f"{{{XFA_TEMPLATE_NS}}}bind")
     bind.set("match", "none")
+
+    traversal = etree.SubElement(field, f"{{{XFA_TEMPLATE_NS}}}traversal")
+    traverse = etree.SubElement(traversal, f"{{{XFA_TEMPLATE_NS}}}traverse")
+    traverse.set("ref", "")

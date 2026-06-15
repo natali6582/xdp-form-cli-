@@ -10,3 +10,5 @@ build/
 examples/*_copy.*
 examples/*.pdf
 examples/*_report.csv
+
+out/

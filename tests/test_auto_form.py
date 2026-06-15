@@ -21,10 +21,14 @@ from xdp_form_cli.auto_form import (
     detect_field_specs,
     _apply_signature_context_rows,
     _bbox_checkbox_boxes_from_xml,
+    _bbox_checkbox_boxes_from_words,
     _bbox_has_signature_label_near_box,
     _bbox_underline_boxes_from_words,
     _bbox_underline_boxes_from_xml,
+    _bbox_word_checkbox_box,
     _checkbox_base_name,
+    _dedupe_final_field_names,
+    _filter_fillable_text_boxes,
     _filter_specs_by_original_content,
     _is_signature_label,
     _load_field_name_resolver,
@@ -93,6 +97,195 @@ def test_detect_field_specs_keeps_signature_underline_when_rejected_geo_overlaps
     assert len(signature_specs) == 1
     assert signature_specs[0].x >= 390
     assert signature_specs[0].w >= 100
+
+
+def _write_blank_pdf(path: Path, page_size=(600, 500)) -> Path:
+    pdf = pikepdf.Pdf.new()
+    pdf.add_blank_page(page_size=page_size)
+    pdf.save(path)
+    return path
+
+
+def test_detect_field_specs_classifies_rtl_name_signature_date_rows_independently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import xdp_form_cli.auto_form as auto_form
+
+    source = _write_blank_pdf(tmp_path / "rtl-name-signature-date.pdf")
+    bbox_xml = """<page width="600" height="500">
+<word xMin="264.6" yMin="108" xMax="283.9" yMax="120">:\u05dd\u05e9</word>
+<word xMin="127.2" yMin="108" xMax="212.0" yMax="120">______________</word>
+<word xMin="248.4" yMin="128" xMax="284.0" yMax="140">:\u05d4\u05de\u05d9\u05ea\u05d7</word>
+<word xMin="127.2" yMin="128" xMax="211.9" yMax="140">______________</word>
+<word xMin="250.5" yMin="148" xMax="284.0" yMax="160">:\u05da\u05d9\u05e8\u05d0\u05ea</word>
+<word xMin="127.2" yMin="148" xMax="211.9" yMax="160">______________</word>
+</page>"""
+    monkeypatch.setattr(auto_form, "_read_bbox_xml", lambda _pdf_path: bbox_xml)
+
+    specs = detect_field_specs(source)
+
+    bottom_specs = sorted(specs, key=lambda spec: (-spec.y, spec.x))
+    assert [(round(spec.y, 1), spec.field_type, spec.label) for spec in bottom_specs] == [
+        (380.0, "text", ":\u05dd\u05e9"),
+        (360.0, "image", ":\u05d4\u05de\u05d9\u05ea\u05d7"),
+        (340.0, "text", ":\u05da\u05d9\u05e8\u05d0\u05ea"),
+    ]
+
+
+def test_filter_fillable_text_boxes_keeps_stacked_long_blank_lines_with_section_label() -> None:
+    boxes = [
+        DetectedBox(page=1, x=160.0, y=495.0, w=375.0, h=12.0),
+        DetectedBox(page=1, x=162.0, y=481.0, w=375.0, h=12.0),
+        DetectedBox(page=1, x=162.0, y=467.0, w=375.0, h=12.0),
+        DetectedBox(page=1, x=162.0, y=453.0, w=375.0, h=12.0),
+    ]
+    anchors = [TextAnchor("Details:", 450.0, 510.0)]
+
+    filtered = _filter_fillable_text_boxes(boxes, anchors)
+
+    assert filtered == boxes
+
+
+def test_detect_field_specs_does_not_place_text_field_over_printed_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import xdp_form_cli.auto_form as auto_form
+
+    source = _write_blank_pdf(tmp_path / "printed-text-overlap.pdf")
+    conflicting_box = DetectedBox(page=1, x=100.0, y=200.0, w=120.0, h=12.0)
+    monkeypatch.setattr(auto_form, "_read_bbox_xml", lambda _pdf_path: "")
+    monkeypatch.setattr(auto_form, "_detect_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_detect_underline_boxes", lambda _page, _page_index: [conflicting_box])
+    monkeypatch.setattr(auto_form, "_detect_visual_underline_boxes", lambda _pdf_path: {})
+    monkeypatch.setattr(auto_form, "_detect_checkbox_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_detect_glyph_checkbox_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_extract_text_anchors", lambda _page: [TextAnchor("printed text", 112.0, 206.0)])
+
+    specs = detect_field_specs(source)
+
+    assert specs == []
+
+
+def test_detect_field_specs_does_not_use_inline_printed_underscore_as_field(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import xdp_form_cli.auto_form as auto_form
+
+    source = _write_blank_pdf(tmp_path / "inline-printed-underscore.pdf", page_size=(600, 842))
+    inline_underlines = [
+        DetectedBox(page=1, x=415.0, y=725.4, w=100.8, h=12.0),
+        DetectedBox(page=1, x=389.1, y=705.5, w=85.7, h=12.0),
+    ]
+    monkeypatch.setattr(auto_form, "_read_bbox_xml", lambda _pdf_path: "")
+    monkeypatch.setattr(auto_form, "_detect_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_detect_underline_boxes", lambda _page, _page_index: inline_underlines)
+    monkeypatch.setattr(auto_form, "_detect_visual_underline_boxes", lambda _pdf_path: {})
+    monkeypatch.setattr(auto_form, "_detect_checkbox_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_detect_glyph_checkbox_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(
+        auto_form,
+        "_extract_text_anchors",
+        lambda _page: [
+            TextAnchor("\u05ea\u05dc\u05d1\u05d2\u05d5\u05de", 338.95, 725.38),
+            TextAnchor(')"\u05ea\u05d5\u05e4\u05ea\u05d5\u05e9\u05d4"(', 275.21, 725.38),
+            TextAnchor("\u05ea\u05d5\u05e4\u05ea\u05d5\u05e9", 491.98, 705.46),
+            TextAnchor("\u05ea\u05d5\u05e2\u05e6\u05de\u05d0\u05d1", 494.62, 705.46),
+        ],
+    )
+
+    specs = detect_field_specs(source)
+
+    assert specs == []
+
+
+def test_detect_field_specs_does_not_use_bbox_inline_printed_underscore_as_field(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import xdp_form_cli.auto_form as auto_form
+
+    source = _write_blank_pdf(tmp_path / "bbox-inline-printed-underscore.pdf", page_size=(600, 842))
+    bbox_xml = """<page width="600" height="842">
+<word xMin="338.9" yMin="108.0" xMax="371.4" yMax="120.0">\u05ea\u05dc\u05d1\u05d2\u05d5\u05de</word>
+<word xMin="374.1" yMin="108.0" xMax="409.0" yMax="120.0">\u05ea\u05d5\u05e4\u05ea\u05d5\u05e9</word>
+<word xMin="411.6" yMin="108.0" xMax="415.0" yMax="120.0">,</word>
+<word xMin="415.0" yMin="108.0" xMax="535.9" yMax="120.0">____________________</word>
+</page>"""
+    monkeypatch.setattr(auto_form, "_read_bbox_xml", lambda _pdf_path: bbox_xml)
+    monkeypatch.setattr(auto_form, "_detect_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_detect_underline_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_detect_visual_underline_boxes", lambda _pdf_path: {})
+    monkeypatch.setattr(auto_form, "_detect_checkbox_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_detect_glyph_checkbox_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_extract_text_anchors", lambda _page: [])
+
+    specs = detect_field_specs(source)
+
+    assert specs == []
+
+
+def test_detect_field_specs_keeps_visual_blank_lines_when_other_fields_exist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import xdp_form_cli.auto_form as auto_form
+
+    source = _write_blank_pdf(tmp_path / "visual-lines-with-other-fields.pdf")
+    existing_field = DetectedBox(page=1, x=100.0, y=400.0, w=90.0, h=12.0)
+    visual_line = DetectedBox(page=1, x=160.0, y=300.0, w=375.0, h=12.0)
+    monkeypatch.setattr(auto_form, "_read_bbox_xml", lambda _pdf_path: "")
+    monkeypatch.setattr(auto_form, "_detect_boxes", lambda _page, _page_index: [existing_field])
+    monkeypatch.setattr(auto_form, "_detect_underline_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_detect_visual_underline_boxes", lambda _pdf_path: {1: [visual_line]})
+    monkeypatch.setattr(auto_form, "_detect_checkbox_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(auto_form, "_detect_glyph_checkbox_boxes", lambda _page, _page_index: [])
+    monkeypatch.setattr(
+        auto_form,
+        "_extract_text_anchors",
+        lambda _page: [
+            TextAnchor("Name", 205.0, 414.0),
+            TextAnchor("Details:", 450.0, 314.0),
+        ],
+    )
+
+    specs = detect_field_specs(source)
+
+    assert any(
+        spec.field_type == "text"
+        and round(spec.x, 1) == 160.0
+        and round(spec.y, 1) == 300.0
+        and round(spec.w, 1) == 375.0
+        for spec in specs
+    )
+
+
+def test_bbox_checkbox_box_accepts_private_use_symbol_empty_square() -> None:
+    word = BBoxWord(page=1, page_height=600.0, text="\uf0f0", x0=493.3, y0=70.0, x1=500.5, y1=84.7)
+
+    box = _bbox_word_checkbox_box(word)
+
+    assert box == DetectedBox(page=1, x=493.3, y=515.3, w=14.7, h=14.7)
+
+
+def test_bbox_checkbox_boxes_accept_repeated_private_use_symbol_column() -> None:
+    words = [
+        BBoxWord(page=1, page_height=600.0, text="\uf0f0", x0=493.3, y0=70.0, x1=500.5, y1=84.7),
+        BBoxWord(page=1, page_height=600.0, text="\uf0f0", x0=493.3, y0=110.0, x1=500.5, y1=124.7),
+        BBoxWord(page=1, page_height=600.0, text="\uf0f0", x0=493.3, y0=150.0, x1=500.5, y1=164.7),
+    ]
+
+    boxes_by_page = _bbox_checkbox_boxes_from_words({1: words})
+
+    assert boxes_by_page == {
+        1: [
+            DetectedBox(page=1, x=493.3, y=515.3, w=14.7, h=14.7),
+            DetectedBox(page=1, x=493.3, y=475.3, w=14.7, h=14.7),
+            DetectedBox(page=1, x=493.3, y=435.3, w=14.7, h=14.7),
+        ]
+    }
 
 
 def test_signature_label_matches_signature_keyword_only_at_start() -> None:
@@ -169,6 +362,67 @@ def test_bbox_signature_label_uses_english_direction_for_same_line() -> None:
 
     assert _bbox_has_signature_label_near_box(left_line, [signature_word]) is False
     assert _bbox_has_signature_label_near_box(right_line, [signature_word]) is True
+
+
+def test_bbox_signature_label_classifies_each_english_same_row_segment_independently() -> None:
+    signature_line = DetectedBox(page=1, x=195.0, y=700.0, w=120.0, h=12.0)
+    date_line = DetectedBox(page=1, x=470.0, y=700.0, w=120.0, h=12.0)
+    words = [
+        BBoxWord(page=1, page_height=842.0, text="Signature", x0=100.0, y0=130.0, x1=150.0, y1=142.0),
+        BBoxWord(page=1, page_height=842.0, text="client", x0=155.0, y0=130.0, x1=185.0, y1=142.0),
+        BBoxWord(page=1, page_height=842.0, text="Date", x0=360.0, y0=130.0, x1=390.0, y1=142.0),
+        BBoxWord(page=1, page_height=842.0, text="of", x0=395.0, y0=130.0, x1=407.0, y1=142.0),
+        BBoxWord(page=1, page_height=842.0, text="signature", x0=412.0, y0=130.0, x1=460.0, y1=142.0),
+    ]
+
+    assert _bbox_has_signature_label_near_box(signature_line, words) is True
+    assert _bbox_has_signature_label_near_box(date_line, words) is False
+
+
+def test_bbox_signature_label_classifies_each_hebrew_same_row_segment_independently() -> None:
+    signature_line = DetectedBox(page=1, x=320.0, y=700.0, w=120.0, h=12.0)
+    date_line = DetectedBox(page=1, x=100.0, y=700.0, w=110.0, h=12.0)
+    words = [
+        BBoxWord(
+            page=1,
+            page_height=842.0,
+            text="\u05ea\u05de\u05d9\u05ea\u05d7",
+            x0=460.0,
+            y0=130.0,
+            x1=510.0,
+            y1=142.0,
+        ),
+        BBoxWord(
+            page=1,
+            page_height=842.0,
+            text="\u05d7\u05d5\u05e7\u05dc",
+            x0=425.0,
+            y0=130.0,
+            x1=455.0,
+            y1=142.0,
+        ),
+        BBoxWord(
+            page=1,
+            page_height=842.0,
+            text="\u05da\u05d9\u05e8\u05d0\u05ea",
+            x0=280.0,
+            y0=130.0,
+            x1=320.0,
+            y1=142.0,
+        ),
+        BBoxWord(
+            page=1,
+            page_height=842.0,
+            text="\u05d4\u05de\u05d9\u05ea\u05d7",
+            x0=235.0,
+            y0=130.0,
+            x1=275.0,
+            y1=142.0,
+        ),
+    ]
+
+    assert _bbox_has_signature_label_near_box(signature_line, words) is True
+    assert _bbox_has_signature_label_near_box(date_line, words) is False
 
 
 def test_pure_underline_below_signature_label_is_detected_as_fillable() -> None:
@@ -426,7 +680,9 @@ def test_build_auto_client_form_uses_packaged_plan_t_defaults(tmp_path: Path) ->
     )
 
     assert count == 1
-    assert "txtAccountName" in csv_path.read_text(encoding="utf-8")
+    # The full Plan-T inventory resolves "Account Owner Full Name" to the
+    # owner-name field, not the account-name field.
+    assert "txtNameOfAccountOwner" in csv_path.read_text(encoding="utf-8")
     assert summary.warnings == ("Plan-T field-name resolver matched all 1 field(s).",)
 
 
@@ -1478,6 +1734,43 @@ def test_apply_signature_context_rows_converts_only_fields_whose_own_label_start
         ("txtParentName", "text"),
         ("imgParentSignature", "image"),
         ("txtParentDate", "text"),
+    ]
+
+
+def test_final_field_names_suffix_duplicates_after_signature_conversion() -> None:
+    specs = [
+        AutoFieldSpec(
+            page=21,
+            name="imgPersonSignature",
+            field_type="image",
+            x=340.0,
+            y=280.0,
+            w=130.0,
+            h=12.0,
+            label="\u05d7\u05ea\u05d9\u05de\u05d4",
+        ),
+        AutoFieldSpec(
+            page=21,
+            name="txtPersonSignature",
+            field_type="text",
+            x=180.0,
+            y=280.0,
+            w=130.0,
+            h=12.0,
+            label="\u05d7\u05ea\u05d9\u05de\u05d4",
+        ),
+    ]
+
+    updated = _dedupe_final_field_names(
+        _apply_signature_context_rows(
+            specs,
+            [SignatureContext(page=21, x0=250.0, x1=290.0, y=325.0, direction="rtl")],
+        )
+    )
+
+    assert [(spec.name, spec.field_type) for spec in updated] == [
+        ("imgPersonSignature", "image"),
+        ("imgPersonSignature_duplicate1", "image"),
     ]
 
 

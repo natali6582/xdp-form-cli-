@@ -1,0 +1,8 @@
+{
+  "patterns": [
+    { "match": "מספר עוסק", "type": "text", "width": 120 },
+    { "match": "מיקוד|zip|postal", "type": "text", "width": 70 },
+    { "match": "סניף|branch", "type": "text", "width": 90 }
+  ],
+  "checkbox_glyphs": ["☐", "□", "◻"]
+}

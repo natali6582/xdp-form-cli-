@@ -203,6 +203,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite output file(s) if they already exist (a timestamped backup is created automatically).",
     )
 
+    detect_parser = subparsers.add_parser(
+        "detect",
+        help="Analyze a PDF with deterministic heuristics and write a field-spec CSV of detected fields.",
+    )
+    detect_parser.add_argument("--input", required=True, help="Path to the source PDF file.")
+    detect_parser.add_argument(
+        "--output",
+        required=True,
+        help="Path for the detected field-spec CSV. Must not be the source file.",
+    )
+    detect_parser.add_argument(
+        "--patterns",
+        default=None,
+        help="Optional detection-patterns.json file extending the built-in label patterns.",
+    )
+    detect_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Overwrite the output CSV if it already exists (a timestamped backup is created automatically).",
+    )
+
     create_acroform = subparsers.add_parser(
         "create-acroform",
         help="Create a new PDF copy with AcroForm fields from a CSV field specification.",
@@ -228,6 +250,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Overwrite output file if it already exists (a timestamped backup is created automatically).",
+    )
+    create_acroform.add_argument(
+        "--design-xfa",
+        action="store_true",
+        default=False,
+        help="Also embed a scratch-built XFA template with the same fields so the PDF "
+        "opens with editable fields in LiveCycle Designer's Design View. "
+        "Without this flag the output is unchanged from previous versions.",
     )
 
     validate_acroform_parser = subparsers.add_parser(
@@ -500,6 +530,26 @@ def cmd_azure_layout_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_detect(args: argparse.Namespace) -> int:
+    if args.input == args.output:
+        raise ValueError("--output must be a new file path, not the source file.")
+    if not _is_pdf(args.input):
+        raise ValueError("detect only supports PDF input.")
+
+    from xdp_form_cli.field_detection import detect_fields, write_detected_csv
+
+    colors.step(f"Analyzing PDF for likely form fields: {args.input}")
+    if args.patterns:
+        colors.info(f"Using extra label patterns from: {args.patterns}")
+    fields = detect_fields(args.input, patterns_path=args.patterns)
+    if not fields:
+        colors.warn("No fields were detected. The PDF may have no boxes, underlines, or 'Label:' anchors.")
+    csv_path = write_detected_csv(fields, args.output, overwrite=args.overwrite)
+    colors.success(f"Detected {len(fields)} field(s); saved field-spec CSV: {csv_path}")
+    colors.info("Review the CSV, adjust any row, then build with create-acroform.")
+    return 0
+
+
 def cmd_create_acroform(args: argparse.Namespace) -> int:
     if args.input == args.output:
         raise ValueError("--output must be a new file path, not the source file.")
@@ -512,6 +562,32 @@ def cmd_create_acroform(args: argparse.Namespace) -> int:
     _print_validation_result(precheck, strict=args.strict_validation, title="Pre-create validation")
     if precheck.has_failures(strict=args.strict_validation):
         raise ValueError("Validation failed. Fix the field specification before creating the PDF.")
+
+    if getattr(args, "design_xfa", False):
+        # Build the AcroForm copy to a temp file, validate it, then embed the
+        # scratch XFA template into the final output. The AcroForm layer is
+        # byte-identical to the default path; only /AcroForm /XFA is added.
+        import tempfile
+
+        from xdp_form_cli.acroform_builder import load_field_specs
+        from xdp_form_cli.xfa_template_builder import embed_scratch_xfa
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            staged = Path(tmp_dir) / "acroform_only.pdf"
+            _, count = create_acroform_pdf(args.input, args.fields, staged)
+            colors.success(f"Created AcroForm layer with {count} field(s).")
+
+            postcheck = validate_acroform(args.fields, input_pdf=args.input, output_pdf=str(staged))
+            _print_validation_result(postcheck, strict=args.strict_validation, title="Post-create PDF validation")
+            if postcheck.has_failures(strict=args.strict_validation):
+                raise ValueError("Generated PDF failed validation.")
+
+            colors.step("Embedding scratch XFA template for Design View.")
+            specs = load_field_specs(args.fields)
+            output = embed_scratch_xfa(staged, args.output, specs, overwrite=args.overwrite)
+            colors.success(f"Saved AcroForm+XFA PDF copy: {output}")
+            colors.info("Open in LiveCycle Designer to edit fields in Design View; PDF view is unchanged.")
+        return 0
 
     output, count = create_acroform_pdf(args.input, args.fields, args.output, overwrite=args.overwrite)
     colors.success(f"Saved AcroForm PDF copy with {count} field(s): {output}")
@@ -599,6 +675,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_auto_client_form(args)
         if args.command == "azure-layout-report":
             return cmd_azure_layout_report(args)
+        if args.command == "detect":
+            return cmd_detect(args)
         if args.command == "create-acroform":
             return cmd_create_acroform(args)
         if args.command == "validate-acroform":

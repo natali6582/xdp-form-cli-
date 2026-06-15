@@ -39,6 +39,13 @@ def _write_uploadable_plan_t_alias_pdf(path: Path) -> Path:
     return path
 
 
+def _pdf_field_names(path: Path) -> set[str]:
+    with pikepdf.open(path) as pdf:
+        acroform = pdf.Root.get(Name("/AcroForm"), {})
+        fields = acroform.get(Name("/Fields"), [])
+        return {str(field.get(Name("/T"))) for field in fields}
+
+
 def test_index_renders_upload_form(tmp_path: Path) -> None:
     app = create_app({"TESTING": True, "JOB_STORAGE_DIR": tmp_path})
     client = app.test_client()
@@ -88,7 +95,7 @@ def test_upload_rejects_non_pdf(tmp_path: Path) -> None:
     assert "Only .pdf uploads are supported." in response.get_data(as_text=True)
 
 
-def test_upload_builds_pdf_and_csv_and_exposes_downloads(tmp_path: Path) -> None:
+def test_upload_builds_fresh_pdf_without_persisting_input_or_csv(tmp_path: Path) -> None:
     source = _write_uploadable_pdf(tmp_path / "source.pdf")
     app = create_app({"TESTING": True, "JOB_STORAGE_DIR": tmp_path / "jobs"})
     client = app.test_client()
@@ -104,21 +111,20 @@ def test_upload_builds_pdf_and_csv_and_exposes_downloads(tmp_path: Path) -> None
     page = response.get_data(as_text=True)
     assert "Output PDF ready" in page
     assert "Download PDF" in page
-    assert "Download CSV" in page
+    assert "Download CSV" not in page
 
     job_dir = next((tmp_path / "jobs").iterdir())
     output_pdf = job_dir / "source_acroform.pdf"
-    output_csv = job_dir / "source_fields.csv"
     assert output_pdf.is_file()
-    assert output_csv.is_file()
+    assert not (job_dir / "source.pdf").exists()
+    assert not (job_dir / "source_fields.csv").exists()
 
     pdf_download = client.get(f"/downloads/{job_dir.name}/pdf")
     csv_download = client.get(f"/downloads/{job_dir.name}/csv")
 
     assert pdf_download.status_code == 200
     assert pdf_download.headers["Content-Type"] == "application/pdf"
-    assert csv_download.status_code == 200
-    assert "page,name,type,x,y,w,h,value" in csv_download.get_data(as_text=True)
+    assert csv_download.status_code == 404
 
 
 def test_upload_uses_packaged_plan_t_defaults_for_field_names(tmp_path: Path) -> None:
@@ -135,12 +141,9 @@ def test_upload_uses_packaged_plan_t_defaults_for_field_names(tmp_path: Path) ->
 
     assert response.status_code == 200
     job_dir = next((tmp_path / "jobs").iterdir())
-    csv_download = client.get(f"/downloads/{job_dir.name}/csv")
-
-    assert csv_download.status_code == 200
-    csv_text = csv_download.get_data(as_text=True)
-    assert "txtAccountName" in csv_text
-    assert "txtNameOfAccountOwner" not in csv_text
+    # The full Plan-T inventory resolves "Account Owner Full Name" to the
+    # owner-name field, which is itself a canonical Plan-T name.
+    assert "txtNameOfAccountOwner" in _pdf_field_names(job_dir / "source_acroform.pdf")
 
 
 def test_upload_ignores_unexpected_template_file_and_uses_single_pdf_flow(tmp_path: Path) -> None:
@@ -164,5 +167,4 @@ def test_upload_ignores_unexpected_template_file_and_uses_single_pdf_flow(tmp_pa
     assert "Output PDF ready" in page
     assert "template-transfer" not in page
     job_dir = next((tmp_path / "jobs").iterdir())
-    output_csv = job_dir / "source_fields.csv"
-    assert output_csv.is_file()
+    assert not (job_dir / "source_fields.csv").exists()
